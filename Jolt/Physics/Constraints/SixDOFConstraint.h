@@ -202,7 +202,7 @@ public:
 private:
 	// Calculate properties needed for the position constraint
 	inline void					GetPositionConstraintProperties(Vec3 &outR1PlusU, Vec3 &outR2, Vec3 &outU) const;
-	bool						SolveRotationPositionConstraint(float inBaumgarte);
+	bool						SolveRotationPositionConstraint(float inBaumgarte, float inDeadZone = 0.0f);
 
 	// Sanitize the translation limits
 	inline void					UpdateTranslationLimits();

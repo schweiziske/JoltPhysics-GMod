@@ -717,7 +717,7 @@ bool SixDOFConstraint::SolveVelocityConstraint(float inDeltaTime)
 	return impulse;
 }
 
-bool SixDOFConstraint::SolveRotationPositionConstraint(float inBaumgarte)
+bool SixDOFConstraint::SolveRotationPositionConstraint(float inBaumgarte, float inDeadZone)
 {
 	bool impulse = false;
 
@@ -731,6 +731,15 @@ bool SixDOFConstraint::SolveRotationPositionConstraint(float inBaumgarte)
 		// So: r0^-1 = (c1 c2^-1)^-1 = c2 * c1^-1
 		Quat constraint_to_body1 = mConstraintToBody1 * Quat::sEulerAngles(GetRotationLimitsMin());
 		Quat inv_initial_orientation = mConstraintToBody2 * constraint_to_body1.Conjugated();
+		if (inDeadZone > 0.0f)
+		{
+			// Source's locked wheel limits tolerate a small amount of angular
+			// noise. Avoid feeding that noise back into the body at rest.
+			Quat diff = mBody2->GetRotation() * inv_initial_orientation * mBody1->GetRotation().Conjugated();
+			Vec3 error = 2.0f * diff.EnsureWPositive().GetXYZ();
+			if (error.LengthSq() <= inDeadZone * inDeadZone)
+				return false;
+		}
 
 		// Solve rotation violations
 		mRotationConstraintPart.CalculateConstraintProperties(*mBody1, Mat44::sRotation(mBody1->GetRotation()), *mBody2, Mat44::sRotation(mBody2->GetRotation()));
@@ -753,7 +762,7 @@ bool SixDOFConstraint::SolvePositionConstraintInLegacyGroup(float inDeltaTime, f
 	(void)inDeltaTime;
 	// Source's AdvBallsocket(onlyrotation=true) leaves the pivot translation
 	// to the suspension constraints. Correct only the rotational error here.
-	return SolveRotationPositionConstraint(inBaumgarte);
+	return SolveRotationPositionConstraint(inBaumgarte, DegreesToRadians(0.5f));
 }
 
 bool SixDOFConstraint::SolvePositionConstraint(float inDeltaTime, float inBaumgarte)
