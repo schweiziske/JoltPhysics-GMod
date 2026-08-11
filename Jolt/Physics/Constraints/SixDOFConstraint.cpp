@@ -717,7 +717,7 @@ bool SixDOFConstraint::SolveVelocityConstraint(float inDeltaTime)
 	return impulse;
 }
 
-bool SixDOFConstraint::SolvePositionConstraint(float inDeltaTime, float inBaumgarte)
+bool SixDOFConstraint::SolveRotationPositionConstraint(float inBaumgarte)
 {
 	bool impulse = false;
 
@@ -744,6 +744,21 @@ bool SixDOFConstraint::SolvePositionConstraint(float inDeltaTime, float inBaumga
 		Quat q = GetRotationInConstraintSpace();
 		impulse |= mSwingTwistConstraintPart.SolvePositionConstraint(*mBody1, *mBody2, q, mConstraintToBody1, mConstraintToBody2, inBaumgarte);
 	}
+
+	return impulse;
+}
+
+bool SixDOFConstraint::SolvePositionConstraintInLegacyGroup(float inDeltaTime, float inBaumgarte)
+{
+	(void)inDeltaTime;
+	// Source's AdvBallsocket(onlyrotation=true) leaves the pivot translation
+	// to the suspension constraints. Correct only the rotational error here.
+	return SolveRotationPositionConstraint(inBaumgarte);
+}
+
+bool SixDOFConstraint::SolvePositionConstraint(float inDeltaTime, float inBaumgarte)
+{
+	bool impulse = SolveRotationPositionConstraint(inBaumgarte);
 
 	// Solve position violations
 	if (IsTranslationFullyConstrained())

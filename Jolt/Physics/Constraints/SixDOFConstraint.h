@@ -121,6 +121,7 @@ public:
 	virtual void				WarmStartVelocityConstraint(float inWarmStartImpulseRatio) override;
 	virtual bool				SolveVelocityConstraint(float inDeltaTime) override;
 	virtual bool				SolvePositionConstraint(float inDeltaTime, float inBaumgarte) override;
+	virtual bool				SolvePositionConstraintInLegacyGroup(float inDeltaTime, float inBaumgarte) override;
 #ifdef JPH_DEBUG_RENDERER
 	virtual void				DrawConstraint(DebugRenderer *inRenderer) const override;
 	virtual void				DrawConstraintLimits(DebugRenderer *inRenderer) const override;
@@ -201,6 +202,7 @@ public:
 private:
 	// Calculate properties needed for the position constraint
 	inline void					GetPositionConstraintProperties(Vec3 &outR1PlusU, Vec3 &outR2, Vec3 &outU) const;
+	bool						SolveRotationPositionConstraint(float inBaumgarte);
 
 	// Sanitize the translation limits
 	inline void					UpdateTranslationLimits();

@@ -9,6 +9,7 @@
 #include <Jolt/ObjectStream/TypeDeclarations.h>
 #include <Jolt/Core/StreamIn.h>
 #include <Jolt/Core/StreamOut.h>
+
 #ifdef JPH_DEBUG_RENDERER
 	#include <Jolt/Renderer/DebugRenderer.h>
 #endif // JPH_DEBUG_RENDERER
@@ -202,6 +203,8 @@ void DistanceConstraint::CalculateConstraintProperties(float inDeltaTime)
 void DistanceConstraint::SetupVelocityConstraint(float inDeltaTime)
 {
 	CalculateConstraintProperties(inDeltaTime);
+	if (mUseVelocityOnlySolver)
+		mVelocityOnlySolvePending = true;
 	if (mVelocityOnlyDebugEnabled)
 		mVelocityOnlyDebugStats = {};
 }
@@ -225,39 +228,53 @@ bool DistanceConstraint::SolveVelocityConstraint(float inDeltaTime)
 	{
 		if (mUseVelocityOnlySolver)
 		{
-			if (!mVelocityOnlyDebugEnabled)
-				return mAxisConstraint.SolveVelocityConstraintWithRelaxation(*mBody1, *mBody2, mWorldSpaceNormal, mTargetVelocityBias, mVelocityRelaxation);
-
-			const Vec3 linear_velocity_before = mBody1->GetLinearVelocity();
-			const Vec3 angular_velocity_before = mBody1->GetAngularVelocity();
-			const float lambda_before = mAxisConstraint.GetTotalLambda();
-			const bool applied_impulse = mAxisConstraint.SolveVelocityConstraintWithRelaxation(*mBody1, *mBody2, mWorldSpaceNormal, mTargetVelocityBias, mVelocityRelaxation);
-			const Vec3 linear_delta = mBody1->GetLinearVelocity() - linear_velocity_before;
-			const Vec3 angular_delta = mBody1->GetAngularVelocity() - angular_velocity_before;
-			const float delta_lambda = mAxisConstraint.GetTotalLambda() - lambda_before;
-
-			VelocityOnlyDebugStats &stats = mVelocityOnlyDebugStats;
-			const uint step = ++stats.mNumSteps;
-			stats.mTotalLinearVelocityDeltaBody1 += linear_delta;
-			stats.mTotalAngularVelocityDeltaBody1 += angular_delta;
-			if (linear_delta.LengthSq() > stats.mPeakLinearVelocityDeltaBody1.LengthSq())
-			{
-				stats.mPeakLinearStep = step;
-				stats.mPeakLinearVelocityDeltaBody1 = linear_delta;
-				stats.mPeakLinearDeltaLambda = delta_lambda;
-			}
-			if (angular_delta.LengthSq() > stats.mPeakAngularVelocityDeltaBody1.LengthSq())
-			{
-				stats.mPeakAngularStep = step;
-				stats.mPeakAngularVelocityDeltaBody1 = angular_delta;
-			}
-			return applied_impulse;
+			if (GetLegacyConstraintGroup())
+				return SolveVelocityOnlyConstraintStep();
+			if (!mVelocityOnlySolvePending)
+				return false;
+			mVelocityOnlySolvePending = false;
+			bool appliedImpulse = false;
+			for (uint step = 0; step < 9; ++step)
+				appliedImpulse |= SolveVelocityOnlyConstraintStep();
+			return appliedImpulse;
 		}
 		else
 			return mAxisConstraint.SolveVelocityConstraint(*mBody1, *mBody2, mWorldSpaceNormal, mMinLambda, mMaxLambda);
 	}
 	else
 		return false;
+}
+
+bool DistanceConstraint::SolveVelocityOnlyConstraintStep()
+{
+	if (!mAxisConstraint.IsActive())
+		return false;
+
+	const Vec3 linearVelocityBefore = mBody1->GetLinearVelocity();
+	const Vec3 angularVelocityBefore = mBody1->GetAngularVelocity();
+	const float lambdaBefore = mAxisConstraint.GetTotalLambda();
+	const bool appliedImpulse = mAxisConstraint.SolveVelocityConstraintWithRelaxation(*mBody1, *mBody2, mWorldSpaceNormal, mTargetVelocityBias, mVelocityRelaxation);
+	if (mVelocityOnlyDebugEnabled)
+	{
+		const Vec3 linearDelta = mBody1->GetLinearVelocity() - linearVelocityBefore;
+		const Vec3 angularDelta = mBody1->GetAngularVelocity() - angularVelocityBefore;
+		VelocityOnlyDebugStats &stats = mVelocityOnlyDebugStats;
+		const uint step = ++stats.mNumSteps;
+		stats.mTotalLinearVelocityDeltaBody1 += linearDelta;
+		stats.mTotalAngularVelocityDeltaBody1 += angularDelta;
+		if (linearDelta.LengthSq() > stats.mPeakLinearVelocityDeltaBody1.LengthSq())
+		{
+			stats.mPeakLinearStep = step;
+			stats.mPeakLinearVelocityDeltaBody1 = linearDelta;
+			stats.mPeakLinearDeltaLambda = mAxisConstraint.GetTotalLambda() - lambdaBefore;
+		}
+		if (angularDelta.LengthSq() > stats.mPeakAngularVelocityDeltaBody1.LengthSq())
+		{
+			stats.mPeakAngularStep = step;
+			stats.mPeakAngularVelocityDeltaBody1 = angularDelta;
+		}
+	}
+	return appliedImpulse;
 }
 
 bool DistanceConstraint::SolvePositionConstraint(float inDeltaTime, float inBaumgarte)

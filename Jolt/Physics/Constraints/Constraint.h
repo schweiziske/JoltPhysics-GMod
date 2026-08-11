@@ -9,6 +9,9 @@
 #include <Jolt/Core/Result.h>
 #include <Jolt/ObjectStream/SerializableObject.h>
 
+#include <atomic>
+#include <vector>
+
 JPH_NAMESPACE_BEGIN
 
 class BodyID;
@@ -18,6 +21,7 @@ class BodyManager;
 class StateRecorder;
 class StreamIn;
 class StreamOut;
+class LegacyConstraintGroup;
 #ifdef JPH_DEBUG_RENDERER
 class DebugRenderer;
 #endif // JPH_DEBUG_RENDERER
@@ -178,6 +182,10 @@ public:
 	virtual void				WarmStartVelocityConstraint(float inWarmStartImpulseRatio) = 0;
 	virtual bool				SolveVelocityConstraint(float inDeltaTime) = 0;
 	virtual bool				SolvePositionConstraint(float inDeltaTime, float inBaumgarte) = 0;
+	/// Optional position correction for constraints participating in a legacy group.
+	/// The default is disabled because the group owns its velocity ordering and
+	/// most Source group constraints must not run Jolt's normal position pass.
+	virtual bool				SolvePositionConstraintInLegacyGroup(float inDeltaTime, float inBaumgarte) { return false; }
 	///@}
 
 	/// Link bodies that are connected by this constraint in the island builder
@@ -205,6 +213,9 @@ public:
 
 	/// Debug function to convert a constraint to its settings, note that this will not save to which bodies the constraint is connected to
 	virtual Ref<ConstraintSettings> GetConstraintSettings() const = 0;
+
+	void						SetLegacyConstraintGroup(LegacyConstraintGroup *inGroup) { mLegacyConstraintGroup = inGroup; }
+	LegacyConstraintGroup *		GetLegacyConstraintGroup() const { return mLegacyConstraintGroup; }
 
 protected:
 	/// Helper function to copy settings back to constraint settings for this base class
@@ -238,6 +249,25 @@ private:
 
 	/// User data value (can be used by application)
 	uint64						mUserData;
+	LegacyConstraintGroup *		mLegacyConstraintGroup = nullptr;
+};
+
+/// Coordinates Source's local-constraint-system ordering for a complete group
+/// of Jolt constraints. Jolt's outer velocity iterations become no-ops for
+/// members of this group.
+class JPH_EXPORT LegacyConstraintGroup final
+{
+public:
+	void					AddConstraint(Constraint *inConstraint);
+	void					RemoveConstraint(Constraint *inConstraint);
+	void					PrepareVelocitySolve() { mSolvePending.store(true, std::memory_order_release); }
+	void					SetAdditionalIterations(uint inAdditionalIterations) { mAdditionalIterations = inAdditionalIterations; }
+	bool					SolveVelocityConstraints(Constraint *inCaller, float inDeltaTime);
+
+private:
+	std::vector<Constraint *>		mConstraints;
+	std::atomic<bool>			mSolvePending{ false };
+	uint						mAdditionalIterations = 0;
 };
 
 JPH_NAMESPACE_END

@@ -9,6 +9,8 @@
 #include <Jolt/ObjectStream/TypeDeclarations.h>
 #include <Jolt/Core/StreamUtils.h>
 
+#include <algorithm>
+
 JPH_NAMESPACE_BEGIN
 
 JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConstraintSettings)
@@ -68,6 +70,55 @@ void Constraint::ToConstraintSettings(ConstraintSettings &outSettings) const
 #ifdef JPH_DEBUG_RENDERER
 	outSettings.mDrawConstraintSize = mDrawConstraintSize;
 #endif // JPH_DEBUG_RENDERER
+}
+
+void LegacyConstraintGroup::AddConstraint(Constraint *inConstraint)
+{
+	if (std::find(mConstraints.begin(), mConstraints.end(), inConstraint) == mConstraints.end())
+		mConstraints.push_back(inConstraint);
+	inConstraint->SetLegacyConstraintGroup(this);
+}
+
+void LegacyConstraintGroup::RemoveConstraint(Constraint *inConstraint)
+{
+	if (inConstraint->GetLegacyConstraintGroup() == this)
+		inConstraint->SetLegacyConstraintGroup(nullptr);
+	std::erase(mConstraints, inConstraint);
+}
+
+bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float inDeltaTime)
+{
+	if (!mSolvePending.exchange(false, std::memory_order_acq_rel))
+		return false;
+
+	bool appliedImpulse = false;
+	auto solveForward = [&]()
+	{
+		for (Constraint *constraint : mConstraints)
+			if (constraint->IsActive())
+				appliedImpulse |= constraint->SolveVelocityConstraint(inDeltaTime);
+	};
+	auto solveReverse = [&]()
+	{
+		for (auto it = mConstraints.rbegin(); it != mConstraints.rend(); ++it)
+			if ((*it)->IsActive())
+				appliedImpulse |= (*it)->SolveVelocityConstraint(inDeltaTime);
+	};
+
+	// Source performs one setup solve, followed by m_n_iterations passes;
+	// m_n_iterations is additionalIterations + 2 and each pass has two
+	// reverse/forward stages.
+	solveForward();
+	for (uint iteration = 0; iteration < mAdditionalIterations + 2; ++iteration)
+	{
+		solveReverse();
+		solveForward();
+		solveReverse();
+		solveForward();
+	}
+
+	(void)inCaller;
+	return appliedImpulse;
 }
 
 JPH_NAMESPACE_END

@@ -108,10 +108,10 @@ public:
 	void						SetVelocityOnlyDebugEnabled(bool inEnabled)				{ mVelocityOnlyDebugEnabled = inEnabled; }
 	const VelocityOnlyDebugStats &GetVelocityOnlyDebugStats() const							{ return mVelocityOnlyDebugStats; }
 	Vec3						GetWorldSpaceNormal() const								{ return mWorldSpaceNormal; }
-
 private:
 	// Internal helper function to calculate the values below
 	void						CalculateConstraintProperties(float inDeltaTime);
+	bool						SolveVelocityOnlyConstraintStep();
 
 	// CONFIGURATION PROPERTIES FOLLOW
 
@@ -137,6 +137,7 @@ private:
 	RVec3						mWorldSpacePosition2;
 	Vec3						mWorldSpaceNormal;
 	float						mTargetVelocityBias = 0.0f;
+	bool						mVelocityOnlySolvePending = false;
 	bool						mVelocityOnlyDebugEnabled = false;
 	VelocityOnlyDebugStats		mVelocityOnlyDebugStats;
 

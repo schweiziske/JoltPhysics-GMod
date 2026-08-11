@@ -120,7 +120,11 @@ void ConstraintManager::sSetupVelocityConstraints(Constraint **inActiveConstrain
 	JPH_PROFILE_FUNCTION();
 
 	for (Constraint **c = inActiveConstraints, **c_end = inActiveConstraints + inNumActiveConstraints; c < c_end; ++c)
+	{
 		(*c)->SetupVelocityConstraint(inDeltaTime);
+		if (LegacyConstraintGroup *group = (*c)->GetLegacyConstraintGroup())
+			group->PrepareVelocitySolve();
+	}
 }
 
 template <class ConstraintCallback>
@@ -132,7 +136,10 @@ void ConstraintManager::sWarmStartVelocityConstraints(Constraint **inActiveConst
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
 		ioCallback(c);
-		c->WarmStartVelocityConstraint(inWarmStartImpulseRatio);
+		if (c->GetLegacyConstraintGroup())
+			c->WarmStartVelocityConstraint(0.0f);
+		else
+			c->WarmStartVelocityConstraint(inWarmStartImpulseRatio);
 	}
 }
 
@@ -149,7 +156,10 @@ bool ConstraintManager::sSolveVelocityConstraints(Constraint **inActiveConstrain
 	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
-		any_impulse_applied |= c->SolveVelocityConstraint(inDeltaTime);
+		if (LegacyConstraintGroup *group = c->GetLegacyConstraintGroup())
+			any_impulse_applied |= group->SolveVelocityConstraints(c, inDeltaTime);
+		else
+			any_impulse_applied |= c->SolveVelocityConstraint(inDeltaTime);
 	}
 
 	return any_impulse_applied;
@@ -164,7 +174,10 @@ bool ConstraintManager::sSolvePositionConstraints(Constraint **inActiveConstrain
 	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
-		any_impulse_applied |= c->SolvePositionConstraint(inDeltaTime, inBaumgarte);
+		if (c->GetLegacyConstraintGroup())
+			any_impulse_applied |= c->SolvePositionConstraintInLegacyGroup(inDeltaTime, inBaumgarte);
+		else
+			any_impulse_applied |= c->SolvePositionConstraint(inDeltaTime, inBaumgarte);
 	}
 
 	return any_impulse_applied;
