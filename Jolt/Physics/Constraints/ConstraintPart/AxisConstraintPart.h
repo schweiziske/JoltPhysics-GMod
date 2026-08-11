@@ -306,10 +306,48 @@ public:
 		return ApplyVelocityStep(ioBody1, ioBody2, inWorldSpaceAxis, lambda);
 	}
 
+	/// Apply an under-relaxed velocity-only constraint step. This is useful for
+	/// legacy solvers that apply a fraction of J v on every iteration and carry
+	/// positional error as a velocity bias instead of projecting positions.
+	inline bool					SolveVelocityConstraintWithRelaxation(Body &ioBody1, Body &ioBody2, Vec3Arg inWorldSpaceAxis, float inBias, float inRelaxation)
+	{
+		const MotionProperties *mp1 = ioBody1.GetMotionPropertiesUnchecked();
+		const MotionProperties *mp2 = ioBody2.GetMotionPropertiesUnchecked();
+
+		float jv;
+		if (!ioBody1.IsStatic())
+		{
+			if (!ioBody2.IsStatic())
+				jv = inWorldSpaceAxis.Dot(mp1->GetLinearVelocity() - mp2->GetLinearVelocity());
+			else
+				jv = inWorldSpaceAxis.Dot(mp1->GetLinearVelocity());
+		}
+		else
+		{
+			JPH_ASSERT(!ioBody2.IsStatic());
+			jv = inWorldSpaceAxis.Dot(-mp2->GetLinearVelocity());
+		}
+
+		if (!ioBody1.IsStatic())
+			jv += Vec3::sLoadFloat3Unsafe(mR1PlusUxAxis).Dot(mp1->GetAngularVelocity());
+		if (!ioBody2.IsStatic())
+			jv -= Vec3::sLoadFloat3Unsafe(mR2xAxis).Dot(mp2->GetAngularVelocity());
+
+		const float lambda = mEffectiveMass * (inRelaxation * jv - inBias);
+		mTotalLambda += lambda;
+		return ApplyVelocityStep(ioBody1, ioBody2, inWorldSpaceAxis, lambda);
+	}
+
 	/// Return lagrange multiplier
 	float						GetTotalLambda() const
 	{
 		return mTotalLambda;
+	}
+
+	/// Clear the accumulated impulse without deactivating the constraint.
+	inline void					ResetTotalLambda()
+	{
+		mTotalLambda = 0.0f;
 	}
 
 	/// Iteratively update the position constraint. Makes sure C(...) = 0.

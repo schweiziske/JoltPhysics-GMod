@@ -29,6 +29,10 @@ JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(DistanceConstraintSettings)
 	JPH_ADD_ENUM_ATTRIBUTE_WITH_ALIAS(DistanceConstraintSettings, mLimitsSpringSettings.mMode, "mSpringMode")
 	JPH_ADD_ATTRIBUTE_WITH_ALIAS(DistanceConstraintSettings, mLimitsSpringSettings.mFrequency, "mFrequency") // Renaming attributes to stay compatible with old versions of the library
 	JPH_ADD_ATTRIBUTE_WITH_ALIAS(DistanceConstraintSettings, mLimitsSpringSettings.mDamping, "mDamping")
+	JPH_ADD_ATTRIBUTE(DistanceConstraintSettings, mUseVelocityOnlySolver)
+	JPH_ADD_ATTRIBUTE(DistanceConstraintSettings, mPredictiveLimitActivation)
+	JPH_ADD_ATTRIBUTE(DistanceConstraintSettings, mVelocityBiasFactor)
+	JPH_ADD_ATTRIBUTE(DistanceConstraintSettings, mVelocityRelaxation)
 }
 
 void DistanceConstraintSettings::SaveBinaryState(StreamOut &inStream) const
@@ -41,6 +45,10 @@ void DistanceConstraintSettings::SaveBinaryState(StreamOut &inStream) const
 	inStream.Write(mMinDistance);
 	inStream.Write(mMaxDistance);
 	mLimitsSpringSettings.SaveBinaryState(inStream);
+	inStream.Write(mUseVelocityOnlySolver);
+	inStream.Write(mPredictiveLimitActivation);
+	inStream.Write(mVelocityBiasFactor);
+	inStream.Write(mVelocityRelaxation);
 }
 
 void DistanceConstraintSettings::RestoreBinaryState(StreamIn &inStream)
@@ -53,6 +61,10 @@ void DistanceConstraintSettings::RestoreBinaryState(StreamIn &inStream)
 	inStream.Read(mMinDistance);
 	inStream.Read(mMaxDistance);
 	mLimitsSpringSettings.RestoreBinaryState(inStream);
+	inStream.Read(mUseVelocityOnlySolver);
+	inStream.Read(mPredictiveLimitActivation);
+	inStream.Read(mVelocityBiasFactor);
+	inStream.Read(mVelocityRelaxation);
 }
 
 TwoBodyConstraint *DistanceConstraintSettings::Create(Body &inBody1, Body &inBody2) const
@@ -63,7 +75,11 @@ TwoBodyConstraint *DistanceConstraintSettings::Create(Body &inBody1, Body &inBod
 DistanceConstraint::DistanceConstraint(Body &inBody1, Body &inBody2, const DistanceConstraintSettings &inSettings) :
 	TwoBodyConstraint(inBody1, inBody2, inSettings),
 	mMinDistance(inSettings.mMinDistance),
-	mMaxDistance(inSettings.mMaxDistance)
+	mMaxDistance(inSettings.mMaxDistance),
+	mUseVelocityOnlySolver(inSettings.mUseVelocityOnlySolver),
+	mPredictiveLimitActivation(inSettings.mPredictiveLimitActivation),
+	mVelocityBiasFactor(inSettings.mVelocityBiasFactor),
+	mVelocityRelaxation(inSettings.mVelocityRelaxation)
 {
 	if (inSettings.mSpace == EConstraintSpace::WorldSpace)
 	{
@@ -128,9 +144,11 @@ void DistanceConstraint::CalculateConstraintProperties(float inDeltaTime)
 	Vec3 r1_plus_u = Vec3(mWorldSpacePosition2 - mBody1->GetCenterOfMassPosition());
 	Vec3 r2 = Vec3(mWorldSpacePosition2 - mBody2->GetCenterOfMassPosition());
 
+	float position_error;
+	bool is_active = true;
 	if (mMinDistance == mMaxDistance)
 	{
-		mAxisConstraint.CalculateConstraintPropertiesWithSettingsForLimit(inDeltaTime, *mBody1, r1_plus_u, *mBody2, r2, mWorldSpaceNormal, 0.0f, delta_len - mMinDistance, mLimitsSpringSettings);
+		position_error = delta_len - mMinDistance;
 
 		// Single distance, allow constraint forces in both directions
 		mMinLambda = -FLT_MAX;
@@ -138,7 +156,7 @@ void DistanceConstraint::CalculateConstraintProperties(float inDeltaTime)
 	}
 	else if (delta_len <= mMinDistance)
 	{
-		mAxisConstraint.CalculateConstraintPropertiesWithSettingsForLimit(inDeltaTime, *mBody1, r1_plus_u, *mBody2, r2, mWorldSpaceNormal, 0.0f, delta_len - mMinDistance, mLimitsSpringSettings);
+		position_error = delta_len - mMinDistance;
 
 		// Allow constraint forces to make distance bigger only
 		mMinLambda = 0;
@@ -146,14 +164,39 @@ void DistanceConstraint::CalculateConstraintProperties(float inDeltaTime)
 	}
 	else if (delta_len >= mMaxDistance)
 	{
-		mAxisConstraint.CalculateConstraintPropertiesWithSettingsForLimit(inDeltaTime, *mBody1, r1_plus_u, *mBody2, r2, mWorldSpaceNormal, 0.0f, delta_len - mMaxDistance, mLimitsSpringSettings);
+		position_error = delta_len - mMaxDistance;
 
 		// Allow constraint forces to make distance smaller only
 		mMinLambda = -FLT_MAX;
 		mMaxLambda = 0;
 	}
 	else
+	{
+		position_error = 0.0f;
+		is_active = false;
+
+		if (mUseVelocityOnlySolver && mPredictiveLimitActivation)
+		{
+			const RVec3 next_position1 = mWorldSpacePosition1 + mBody1->GetPointVelocity(mWorldSpacePosition1) * inDeltaTime;
+			const RVec3 next_position2 = mWorldSpacePosition2 + mBody2->GetPointVelocity(mWorldSpacePosition2) * inDeltaTime;
+			const float next_distance = Vec3(next_position2 - next_position1).Length();
+			is_active = next_distance < mMinDistance || next_distance > mMaxDistance;
+		}
+	}
+
+	if (!is_active)
+	{
 		mAxisConstraint.Deactivate();
+		return;
+	}
+
+	if (mUseVelocityOnlySolver)
+	{
+		mAxisConstraint.CalculateConstraintProperties(*mBody1, r1_plus_u, *mBody2, r2, mWorldSpaceNormal);
+		mTargetVelocityBias = mVelocityBiasFactor * position_error / inDeltaTime;
+	}
+	else
+		mAxisConstraint.CalculateConstraintPropertiesWithSettingsForLimit(inDeltaTime, *mBody1, r1_plus_u, *mBody2, r2, mWorldSpaceNormal, 0.0f, position_error, mLimitsSpringSettings);
 }
 
 void DistanceConstraint::SetupVelocityConstraint(float inDeltaTime)
@@ -168,19 +211,30 @@ void DistanceConstraint::ResetWarmStart()
 
 void DistanceConstraint::WarmStartVelocityConstraint(float inWarmStartImpulseRatio)
 {
-	mAxisConstraint.WarmStart(*mBody1, *mBody2, mWorldSpaceNormal, inWarmStartImpulseRatio);
+	if (mUseVelocityOnlySolver)
+		mAxisConstraint.ResetTotalLambda();
+	else
+		mAxisConstraint.WarmStart(*mBody1, *mBody2, mWorldSpaceNormal, inWarmStartImpulseRatio);
 }
 
 bool DistanceConstraint::SolveVelocityConstraint(float inDeltaTime)
 {
 	if (mAxisConstraint.IsActive())
-		return mAxisConstraint.SolveVelocityConstraint(*mBody1, *mBody2, mWorldSpaceNormal, mMinLambda, mMaxLambda);
+	{
+		if (mUseVelocityOnlySolver)
+			return mAxisConstraint.SolveVelocityConstraintWithRelaxation(*mBody1, *mBody2, mWorldSpaceNormal, mTargetVelocityBias, mVelocityRelaxation);
+		else
+			return mAxisConstraint.SolveVelocityConstraint(*mBody1, *mBody2, mWorldSpaceNormal, mMinLambda, mMaxLambda);
+	}
 	else
 		return false;
 }
 
 bool DistanceConstraint::SolvePositionConstraint(float inDeltaTime, float inBaumgarte)
 {
+	if (mUseVelocityOnlySolver)
+		return false;
+
 	if (mLimitsSpringSettings.mFrequency <= 0.0f) // When the spring is active, we don't need to solve the position constraint
 	{
 		float distance = Vec3(mWorldSpacePosition2 - mWorldSpacePosition1).Dot(mWorldSpaceNormal);
@@ -260,6 +314,10 @@ Ref<ConstraintSettings> DistanceConstraint::GetConstraintSettings() const
 	settings->mMinDistance = mMinDistance;
 	settings->mMaxDistance = mMaxDistance;
 	settings->mLimitsSpringSettings = mLimitsSpringSettings;
+	settings->mUseVelocityOnlySolver = mUseVelocityOnlySolver;
+	settings->mPredictiveLimitActivation = mPredictiveLimitActivation;
+	settings->mVelocityBiasFactor = mVelocityBiasFactor;
+	settings->mVelocityRelaxation = mVelocityRelaxation;
 	return settings;
 }
 

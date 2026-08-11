@@ -39,6 +39,13 @@ public:
 	/// When enabled, this makes the limits soft. When the constraint exceeds the limits, a spring force will pull it back.
 	SpringSettings				mLimitsSpringSettings;
 
+	/// Legacy velocity-only limit solver. It under-relaxes J v, carries position
+	/// error as velocity bias and can activate before a limit is crossed.
+	bool						mUseVelocityOnlySolver = false;
+	bool						mPredictiveLimitActivation = false;
+	float						mVelocityBiasFactor = 1.0f;
+	float						mVelocityRelaxation = 1.0f;
+
 protected:
 	// See: ConstraintSettings::RestoreBinaryState
 	virtual void				RestoreBinaryState(StreamIn &inStream) override;
@@ -98,6 +105,10 @@ private:
 	// Min/max distance that must be kept between the world space points
 	float						mMinDistance;
 	float						mMaxDistance;
+	bool						mUseVelocityOnlySolver;
+	bool						mPredictiveLimitActivation;
+	float						mVelocityBiasFactor;
+	float						mVelocityRelaxation;
 
 	// Soft constraint limits
 	SpringSettings				mLimitsSpringSettings;
@@ -108,6 +119,7 @@ private:
 	RVec3						mWorldSpacePosition1;
 	RVec3						mWorldSpacePosition2;
 	Vec3						mWorldSpaceNormal;
+	float						mTargetVelocityBias = 0.0f;
 
 	// Depending on if the distance < min or distance > max we can apply forces to prevent further violations
 	float						mMinLambda;
