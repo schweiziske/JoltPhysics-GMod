@@ -202,7 +202,6 @@ void DistanceConstraint::CalculateConstraintProperties(float inDeltaTime)
 void DistanceConstraint::SetupVelocityConstraint(float inDeltaTime)
 {
 	CalculateConstraintProperties(inDeltaTime);
-	mVelocityOnlySolvePending = mUseVelocityOnlySolver;
 }
 
 void DistanceConstraint::ResetWarmStart()
@@ -223,19 +222,7 @@ bool DistanceConstraint::SolveVelocityConstraint(float inDeltaTime)
 	if (mAxisConstraint.IsActive())
 	{
 		if (mUseVelocityOnlySolver)
-		{
-			// A Source constraint without an explicit group owns a local constraint
-			// system. Its setup step and eight following steps run consecutively,
-			// before another local system can modify either body's velocity.
-			if (!mVelocityOnlySolvePending)
-				return false;
-
-			mVelocityOnlySolvePending = false;
-			bool applied_impulse = false;
-			for (uint iteration = 0; iteration < GetNumVelocityStepsOverride(); ++iteration)
-				applied_impulse |= mAxisConstraint.SolveVelocityConstraintWithRelaxation(*mBody1, *mBody2, mWorldSpaceNormal, mTargetVelocityBias, mVelocityRelaxation);
-			return applied_impulse;
-		}
+			return mAxisConstraint.SolveVelocityConstraintWithRelaxation(*mBody1, *mBody2, mWorldSpaceNormal, mTargetVelocityBias, mVelocityRelaxation);
 		else
 			return mAxisConstraint.SolveVelocityConstraint(*mBody1, *mBody2, mWorldSpaceNormal, mMinLambda, mMaxLambda);
 	}

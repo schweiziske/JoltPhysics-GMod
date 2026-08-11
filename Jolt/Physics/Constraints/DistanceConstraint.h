@@ -120,7 +120,6 @@ private:
 	RVec3						mWorldSpacePosition2;
 	Vec3						mWorldSpaceNormal;
 	float						mTargetVelocityBias = 0.0f;
-	bool						mVelocityOnlySolvePending = false;
 
 	// Depending on if the distance < min or distance > max we can apply forces to prevent further violations
 	float						mMinLambda;
