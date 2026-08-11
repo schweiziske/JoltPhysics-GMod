@@ -55,6 +55,18 @@ protected:
 class JPH_EXPORT DistanceConstraint final : public TwoBodyConstraint
 {
 public:
+	struct VelocityOnlyDebugStats
+	{
+		uint					mNumSteps = 0;
+		Vec3					mTotalLinearVelocityDeltaBody1 = Vec3::sZero();
+		Vec3					mTotalAngularVelocityDeltaBody1 = Vec3::sZero();
+		uint					mPeakLinearStep = 0;
+		Vec3					mPeakLinearVelocityDeltaBody1 = Vec3::sZero();
+		float					mPeakLinearDeltaLambda = 0.0f;
+		uint					mPeakAngularStep = 0;
+		Vec3					mPeakAngularVelocityDeltaBody1 = Vec3::sZero();
+	};
+
 	JPH_OVERRIDE_NEW_DELETE
 
 	/// Construct distance constraint
@@ -92,6 +104,11 @@ public:
 	///@name Get Lagrange multiplier from last physics update (the linear impulse applied to satisfy the constraint)
 	inline float				GetTotalLambdaPosition() const								{ return mAxisConstraint.GetTotalLambda(); }
 
+	/// Capture velocity changes made by this constraint without changing solver behavior.
+	void						SetVelocityOnlyDebugEnabled(bool inEnabled)				{ mVelocityOnlyDebugEnabled = inEnabled; }
+	const VelocityOnlyDebugStats &GetVelocityOnlyDebugStats() const							{ return mVelocityOnlyDebugStats; }
+	Vec3						GetWorldSpaceNormal() const								{ return mWorldSpaceNormal; }
+
 private:
 	// Internal helper function to calculate the values below
 	void						CalculateConstraintProperties(float inDeltaTime);
@@ -120,6 +137,8 @@ private:
 	RVec3						mWorldSpacePosition2;
 	Vec3						mWorldSpaceNormal;
 	float						mTargetVelocityBias = 0.0f;
+	bool						mVelocityOnlyDebugEnabled = false;
+	VelocityOnlyDebugStats		mVelocityOnlyDebugStats;
 
 	// Depending on if the distance < min or distance > max we can apply forces to prevent further violations
 	float						mMinLambda;

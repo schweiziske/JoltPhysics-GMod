@@ -202,6 +202,8 @@ void DistanceConstraint::CalculateConstraintProperties(float inDeltaTime)
 void DistanceConstraint::SetupVelocityConstraint(float inDeltaTime)
 {
 	CalculateConstraintProperties(inDeltaTime);
+	if (mVelocityOnlyDebugEnabled)
+		mVelocityOnlyDebugStats = {};
 }
 
 void DistanceConstraint::ResetWarmStart()
@@ -222,7 +224,35 @@ bool DistanceConstraint::SolveVelocityConstraint(float inDeltaTime)
 	if (mAxisConstraint.IsActive())
 	{
 		if (mUseVelocityOnlySolver)
-			return mAxisConstraint.SolveVelocityConstraintWithRelaxation(*mBody1, *mBody2, mWorldSpaceNormal, mTargetVelocityBias, mVelocityRelaxation);
+		{
+			if (!mVelocityOnlyDebugEnabled)
+				return mAxisConstraint.SolveVelocityConstraintWithRelaxation(*mBody1, *mBody2, mWorldSpaceNormal, mTargetVelocityBias, mVelocityRelaxation);
+
+			const Vec3 linear_velocity_before = mBody1->GetLinearVelocity();
+			const Vec3 angular_velocity_before = mBody1->GetAngularVelocity();
+			const float lambda_before = mAxisConstraint.GetTotalLambda();
+			const bool applied_impulse = mAxisConstraint.SolveVelocityConstraintWithRelaxation(*mBody1, *mBody2, mWorldSpaceNormal, mTargetVelocityBias, mVelocityRelaxation);
+			const Vec3 linear_delta = mBody1->GetLinearVelocity() - linear_velocity_before;
+			const Vec3 angular_delta = mBody1->GetAngularVelocity() - angular_velocity_before;
+			const float delta_lambda = mAxisConstraint.GetTotalLambda() - lambda_before;
+
+			VelocityOnlyDebugStats &stats = mVelocityOnlyDebugStats;
+			const uint step = ++stats.mNumSteps;
+			stats.mTotalLinearVelocityDeltaBody1 += linear_delta;
+			stats.mTotalAngularVelocityDeltaBody1 += angular_delta;
+			if (linear_delta.LengthSq() > stats.mPeakLinearVelocityDeltaBody1.LengthSq())
+			{
+				stats.mPeakLinearStep = step;
+				stats.mPeakLinearVelocityDeltaBody1 = linear_delta;
+				stats.mPeakLinearDeltaLambda = delta_lambda;
+			}
+			if (angular_delta.LengthSq() > stats.mPeakAngularVelocityDeltaBody1.LengthSq())
+			{
+				stats.mPeakAngularStep = step;
+				stats.mPeakAngularVelocityDeltaBody1 = angular_delta;
+			}
+			return applied_impulse;
+		}
 		else
 			return mAxisConstraint.SolveVelocityConstraint(*mBody1, *mBody2, mWorldSpaceNormal, mMinLambda, mMaxLambda);
 	}
