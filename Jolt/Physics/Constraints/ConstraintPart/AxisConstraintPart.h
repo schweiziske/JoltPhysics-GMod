@@ -306,6 +306,36 @@ public:
 		return ApplyVelocityStep(ioBody1, ioBody2, inWorldSpaceAxis, lambda);
 	}
 
+	/// Apply one Havana-style motor/friction step. The returned value is the impulse actually
+	/// applied during this call so the caller can perform reference-position anti-windup.
+	inline float				SolveVelocityConstraintLegacyMotor(Body &ioBody1, Body &ioBody2, Vec3Arg inWorldSpaceAxis, float inBias, float inRelaxation, float inMinLambda, float inMaxLambda, float &outRequestedLambda)
+	{
+		const MotionProperties *mp1 = ioBody1.GetMotionPropertiesUnchecked();
+		const MotionProperties *mp2 = ioBody2.GetMotionPropertiesUnchecked();
+
+		float relative_velocity;
+		if (!ioBody1.IsStatic())
+		{
+			if (!ioBody2.IsStatic())
+				relative_velocity = inWorldSpaceAxis.Dot(mp1->GetLinearVelocity() - mp2->GetLinearVelocity());
+			else
+				relative_velocity = inWorldSpaceAxis.Dot(mp1->GetLinearVelocity());
+		}
+		else
+			relative_velocity = inWorldSpaceAxis.Dot(-mp2->GetLinearVelocity());
+
+		if (!ioBody1.IsStatic())
+			relative_velocity += Vec3::sLoadFloat3Unsafe(mR1PlusUxAxis).Dot(mp1->GetAngularVelocity());
+		if (!ioBody2.IsStatic())
+			relative_velocity -= Vec3::sLoadFloat3Unsafe(mR2xAxis).Dot(mp2->GetAngularVelocity());
+
+		outRequestedLambda = mEffectiveMass * (inRelaxation * relative_velocity - inBias);
+		const float applied_lambda = Clamp(outRequestedLambda, inMinLambda, inMaxLambda);
+		mTotalLambda += applied_lambda;
+		ApplyVelocityStep(ioBody1, ioBody2, inWorldSpaceAxis, applied_lambda);
+		return applied_lambda;
+	}
+
 	/// Apply an under-relaxed velocity-only constraint step. This is useful for
 	/// legacy solvers that apply a fraction of J v on every iteration and carry
 	/// positional error as a velocity bias instead of projecting positions.

@@ -9,6 +9,7 @@
 #include <Jolt/Physics/Constraints/ConstraintPart/DualAxisConstraintPart.h>
 #include <Jolt/Physics/Constraints/ConstraintPart/RotationEulerConstraintPart.h>
 #include <Jolt/Physics/Constraints/ConstraintPart/AxisConstraintPart.h>
+#include <Jolt/Physics/Constraints/LegacyMotorState.h>
 
 JPH_NAMESPACE_BEGIN
 
@@ -108,6 +109,13 @@ public:
 	EMotorState					GetMotorState() const									{ return mMotorState; }
 	void						SetTargetVelocity(float inVelocity)						{ mTargetVelocity = inVelocity; }
 	float						GetTargetVelocity() const								{ return mTargetVelocity; }
+	void						SetLegacyMotor(float inVelocity, float inMaxForce, float inEpsilon = 1.0f)
+	{
+		mLegacyMotor.Configure(inVelocity, inMaxForce, inEpsilon);
+		if (!mLegacyMotor.HasReferencePosition())
+			mLegacyMotor.InitializeLinearReference(GetCurrentPosition());
+	}
+	const LegacyMotorState &	GetLegacyMotorState() const						{ return mLegacyMotor; }
 	void						SetTargetPosition(float inPosition)						{ mTargetPosition = mHasLimits? Clamp(inPosition, mLimitsMin, mLimitsMax) : inPosition; }
 	float						GetTargetPosition() const								{ return mTargetPosition; }
 
@@ -193,6 +201,9 @@ private:
 	RotationEulerConstraintPart	mRotationConstraintPart;
 	AxisConstraintPart			mPositionLimitsConstraintPart;
 	AxisConstraintPart			mMotorConstraintPart;
+	LegacyMotorState			mLegacyMotor;
+	DualAxisConstraintPart::Vec2 mLegacyPositionVelocityBias { DualAxisConstraintPart::Vec2::sZero() };
+	Vec3						mLegacyRotationVelocityBias { Vec3::sZero() };
 };
 
 JPH_NAMESPACE_END

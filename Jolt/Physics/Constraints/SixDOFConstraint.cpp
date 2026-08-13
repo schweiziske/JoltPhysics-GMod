@@ -151,6 +151,16 @@ void SixDOFConstraint::UpdateFixedFreeAxis()
 	}
 }
 
+void SixDOFConstraint::UpdateLegacyRotationLimitMode()
+{
+	constexpr float cJoltLockedAngle = DegreesToRadians(0.5f);
+	mLegacyRotationLimitsExact = true;
+	for (int axis = EAxis::RotationX; axis <= EAxis::RotationZ; ++axis)
+		mLegacyRotationLimitsExact &= mLimitMin[axis] < mLimitMax[axis]
+			&& mLimitMin[axis] > -cJoltLockedAngle
+			&& mLimitMax[axis] < cJoltLockedAngle;
+}
+
 SixDOFConstraint::SixDOFConstraint(Body &inBody1, Body &inBody2, const SixDOFConstraintSettings &inSettings) :
 	TwoBodyConstraint(inBody1, inBody2, inSettings)
 {
@@ -189,6 +199,7 @@ SixDOFConstraint::SixDOFConstraint(Body &inBody1, Body &inBody2, const SixDOFCon
 	UpdateTranslationLimits();
 	UpdateRotationLimits();
 	UpdateFixedFreeAxis();
+	UpdateLegacyRotationLimitMode();
 	CacheHasSpringLimits();
 
 	// Store friction settings
@@ -235,6 +246,7 @@ void SixDOFConstraint::SetRotationLimits(Vec3Arg inLimitMin, Vec3Arg inLimitMax)
 
 	UpdateRotationLimits();
 	UpdateFixedFreeAxis();
+	UpdateLegacyRotationLimitMode();
 }
 
 void SixDOFConstraint::SetMaxFriction(EAxis inAxis, float inFriction)
@@ -455,6 +467,7 @@ void SixDOFConstraint::SetupVelocityConstraint(float inDeltaTime)
 	{
 		// All rotation locked: Setup rotation constraint
 		mRotationConstraintPart.CalculateConstraintProperties(*mBody1, Mat44::sRotation(rotation1), *mBody2, Mat44::sRotation(rotation2));
+		mLegacyRotationLimitActive = false;
 	}
 	else if (IsRotationConstrained() || mRotationMotorActive)
 	{
@@ -464,9 +477,15 @@ void SixDOFConstraint::SetupVelocityConstraint(float inDeltaTime)
 
 		// Use swing twist constraint part
 		if (IsRotationConstrained())
+		{
 			mSwingTwistConstraintPart.CalculateConstraintProperties(*mBody1, *mBody2, q, constraint_body1_to_world);
+			SetupLegacyRotationLimitVelocityConstraint(inDeltaTime, constraint_body1_to_world, q);
+		}
 		else
+		{
 			mSwingTwistConstraintPart.Deactivate();
+			mLegacyRotationLimitActive = false;
+		}
 
 		if (mRotationMotorActive)
 		{
@@ -591,6 +610,59 @@ void SixDOFConstraint::SetupVelocityConstraint(float inDeltaTime)
 			}
 		}
 	}
+	else
+		mLegacyRotationLimitActive = false;
+}
+
+void SixDOFConstraint::SetupLegacyRotationLimitVelocityConstraint(
+	float inDeltaTime,
+	QuatArg inConstraintBody1ToWorld,
+	QuatArg inConstraintRotation)
+{
+	mLegacyRotationLimitActive = false;
+	mLegacyRotationLimitVelocityBias = Vec3::sZero();
+	if (GetLegacyConstraintGroup() == nullptr || !mLegacyRotationLimitsExact || inDeltaTime <= 0.0f)
+		return;
+
+	auto integrate_rotation = [inDeltaTime](QuatArg inRotation, Vec3Arg inAngularVelocity)
+	{
+		const float speed = inAngularVelocity.Length();
+		return speed > 0.0f
+			? (Quat::sRotation(inAngularVelocity / speed, speed * inDeltaTime) * inRotation).Normalized()
+			: inRotation;
+	};
+	const Quat predicted_body1_rotation = integrate_rotation(mBody1->GetRotation(), mBody1->GetAngularVelocity());
+	const Quat predicted_body2_rotation = integrate_rotation(mBody2->GetRotation(), mBody2->GetAngularVelocity());
+	const Quat predicted_constraint_rotation =
+		(predicted_body1_rotation * mConstraintToBody1).Conjugated()
+		* predicted_body2_rotation * mConstraintToBody2;
+
+	const Vec3 predicted_euler = predicted_constraint_rotation.GetEulerAngles();
+	Vec3 clamped_euler = predicted_euler;
+	for (int axis = 0; axis < 3; ++axis)
+		clamped_euler.SetComponent(axis, Clamp(
+			predicted_euler[axis],
+			mLimitMin[EAxis::RotationX + axis],
+			mLimitMax[EAxis::RotationX + axis]));
+	if (clamped_euler == predicted_euler)
+		return;
+	const Quat clamped_rotation = Quat::sEulerAngles(clamped_euler);
+	const Quat error = (inConstraintBody1ToWorld * inConstraintRotation
+		* (inConstraintBody1ToWorld * clamped_rotation).Conjugated()).EnsureWPositive();
+	mLegacyRotationLimitVelocityBias = (2.0f / inDeltaTime) * error.GetXYZ();
+	mLegacyRotationLimitConstraintPart.CalculateConstraintProperties(
+		*mBody1,
+		Mat44::sRotation(mBody1->GetRotation()),
+		*mBody2,
+		Mat44::sRotation(mBody2->GetRotation()));
+	mLegacyRotationLimitActive = true;
+}
+
+bool SixDOFConstraint::SolveLegacyRotationLimitVelocityConstraint()
+{
+	return mLegacyRotationLimitActive
+		&& mLegacyRotationLimitConstraintPart.SolveVelocityConstraintWithBias(
+			*mBody1, *mBody2, mLegacyRotationLimitVelocityBias, 1.0f);
 }
 
 void SixDOFConstraint::ResetWarmStart()
@@ -601,6 +673,8 @@ void SixDOFConstraint::ResetWarmStart()
 		c.Deactivate();
 	mRotationConstraintPart.Deactivate();
 	mSwingTwistConstraintPart.Deactivate();
+	mLegacyRotationLimitConstraintPart.Deactivate();
+	mLegacyRotationLimitActive = false;
 	mPointConstraintPart.Deactivate();
 	for (AxisConstraintPart &c : mTranslationConstraintPart)
 		c.Deactivate();
@@ -624,7 +698,12 @@ void SixDOFConstraint::WarmStartVelocityConstraint(float inWarmStartImpulseRatio
 	if (IsRotationFullyConstrained())
 		mRotationConstraintPart.WarmStart(*mBody1, *mBody2, inWarmStartImpulseRatio);
 	else if (IsRotationConstrained())
-		mSwingTwistConstraintPart.WarmStart(*mBody1, *mBody2, inWarmStartImpulseRatio);
+	{
+		if (GetLegacyConstraintGroup() != nullptr && mLegacyRotationLimitsExact)
+			mLegacyRotationLimitConstraintPart.WarmStart(*mBody1, *mBody2, inWarmStartImpulseRatio);
+		else
+			mSwingTwistConstraintPart.WarmStart(*mBody1, *mBody2, inWarmStartImpulseRatio);
+	}
 
 	// Warm start translation constraints
 	if (IsTranslationFullyConstrained())
@@ -690,7 +769,12 @@ bool SixDOFConstraint::SolveVelocityConstraint(float inDeltaTime)
 	if (IsRotationFullyConstrained())
 		impulse |= mRotationConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2);
 	else if (IsRotationConstrained())
-		impulse |= mSwingTwistConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2);
+	{
+		if (GetLegacyConstraintGroup() != nullptr && mLegacyRotationLimitsExact)
+			impulse |= SolveLegacyRotationLimitVelocityConstraint();
+		else
+			impulse |= mSwingTwistConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2);
+	}
 
 	// Solve position constraint
 	if (IsTranslationFullyConstrained())
@@ -760,9 +844,12 @@ bool SixDOFConstraint::SolveRotationPositionConstraint(float inBaumgarte, float 
 bool SixDOFConstraint::SolvePositionConstraintInLegacyGroup(float inDeltaTime, float inBaumgarte)
 {
 	(void)inDeltaTime;
-	// Source's AdvBallsocket(onlyrotation=true) leaves the pivot translation
-	// to the suspension constraints. Correct only the rotational error here.
-	return SolveRotationPositionConstraint(inBaumgarte, DegreesToRadians(0.5f));
+	// Havana's tiny three-axis wheel limits resolve in velocity space. Keeping a second
+	// split-impulse projection there erases the angular velocity imparted by a moving pinned
+	// SteerMaster. Other SixDOF ragdolls retain the previous Jolt stabilization path.
+	return mLegacyRotationLimitsExact
+		? false
+		: SolveRotationPositionConstraint(inBaumgarte, DegreesToRadians(0.5f));
 }
 
 bool SixDOFConstraint::SolvePositionConstraint(float inDeltaTime, float inBaumgarte)

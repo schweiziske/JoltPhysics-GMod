@@ -147,6 +147,26 @@ public:
 		return ApplyVelocityStep(ioBody1, ioBody2, lambda);
 	}
 
+	/// Velocity-only solve with cached angular drift expressed along the two constrained axes.
+	inline bool					SolveVelocityConstraintWithBias(Body &ioBody1, Body &ioBody2, const Vec2 &inBias, float inRelaxation)
+	{
+		Vec3 delta_ang = ioBody1.GetAngularVelocity() - ioBody2.GetAngularVelocity();
+		Vec2 jv;
+		jv[0] = mB2xA1.Dot(delta_ang);
+		jv[1] = mC2xA1.Dot(delta_ang);
+		Vec2 lambda = mEffectiveMass * (inRelaxation * jv - inBias);
+		mTotalLambda += lambda;
+		return ApplyVelocityStep(ioBody1, ioBody2, lambda);
+	}
+
+	inline Vec2					GetPositionError() const
+	{
+		Vec2 error;
+		error[0] = mA1.Dot(mB2);
+		error[1] = mA1.Dot(mC2);
+		return error;
+	}
+
 	/// Iteratively update the position constraint. Makes sure C(...) = 0.
 	inline bool					SolvePositionConstraint(Body &ioBody1, Body &ioBody2, float inBaumgarte) const
 	{

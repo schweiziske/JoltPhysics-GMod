@@ -91,6 +91,9 @@ private:
 	// The constraint parts
 	RotationEulerConstraintPart	mRotationConstraintPart;
 	PointConstraintPart			mPointConstraintPart;
+	Vec3						mLegacyPositionVelocityBias { Vec3::sZero() };
+	Vec3						mLegacyRotationVelocityBias { Vec3::sZero() };
+	bool						mLegacyFirstVelocitySolve = false;
 };
 
 JPH_NAMESPACE_END

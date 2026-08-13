@@ -161,6 +161,9 @@ SliderConstraint::SliderConstraint(Body &inBody1, Body &inBody2, const SliderCon
 
 	// Store spring settings
 	SetLimitsSpringSettings(inSettings.mLimitsSpringSettings);
+
+	// Havana initializes the prismatic reference coordinate from the live body pose at creation.
+	mLegacyMotor.InitializeLinearReference(GetCurrentPosition());
 }
 
 void SliderConstraint::NotifyShapeChanged(const BodyID &inBodyID, Vec3Arg inDeltaCOM)
@@ -210,7 +213,7 @@ void SliderConstraint::CalculatePositionConstraintProperties(Mat44Arg inRotation
 
 void SliderConstraint::CalculateSlidingAxisAndPosition(Mat44Arg inRotation1)
 {
-	if (mHasLimits || mMotorState != EMotorState::Off || mMaxFrictionForce > 0.0f)
+	if (mHasLimits || mMotorState != EMotorState::Off || mMaxFrictionForce > 0.0f || mLegacyMotor.IsEnabled())
 	{
 		// Calculate world space slider axis
 		mWorldSpaceSliderAxis = inRotation1 * mLocalSpaceSliderAxis1;
@@ -225,13 +228,29 @@ void SliderConstraint::CalculatePositionLimitsConstraintProperties(float inDelta
 	// Check if distance is within limits
 	bool below_min = mD <= mLimitsMin;
 	if (mHasLimits && (below_min || mD >= mLimitsMax))
-		mPositionLimitsConstraintPart.CalculateConstraintPropertiesWithSettingsForLimit(inDeltaTime, *mBody1, mR1 + mU, *mBody2, mR2, mWorldSpaceSliderAxis, 0.0f, mD - (below_min? mLimitsMin : mLimitsMax), mLimitsSpringSettings);
+	{
+		const float position_error = mD - (below_min? mLimitsMin : mLimitsMax);
+		// Source's prismatic limit has a separate limit tau of 1.0 and is solved as
+		// velocity bias even when the main slider strength is lower.
+		const float legacy_bias = GetLegacyConstraintGroup() != nullptr && inDeltaTime > 0.0f
+			? position_error / inDeltaTime
+			: 0.0f;
+		mPositionLimitsConstraintPart.CalculateConstraintPropertiesWithSettingsForLimit(
+			inDeltaTime, *mBody1, mR1 + mU, *mBody2, mR2, mWorldSpaceSliderAxis,
+			legacy_bias, position_error, mLimitsSpringSettings);
+	}
 	else
 		mPositionLimitsConstraintPart.Deactivate();
 }
 
 void SliderConstraint::CalculateMotorConstraintProperties(float inDeltaTime)
 {
+	if (GetLegacyConstraintGroup() != nullptr && mLegacyMotor.IsEnabled())
+	{
+		mMotorConstraintPart.CalculateConstraintProperties(*mBody1, mR1 + mU, *mBody2, mR2, mWorldSpaceSliderAxis);
+		return;
+	}
+
 	switch (mMotorState)
 	{
 	case EMotorState::Off:
@@ -269,6 +288,16 @@ void SliderConstraint::SetupVelocityConstraint(float inDeltaTime)
 	CalculateR1R2U(rotation1, rotation2);
 	CalculatePositionConstraintProperties(rotation1, rotation2);
 	mRotationConstraintPart.CalculateConstraintProperties(*mBody1, rotation1, *mBody2, rotation2);
+	mLegacyPositionVelocityBias.SetZero();
+	mLegacyRotationVelocityBias = Vec3::sZero();
+	if (GetLegacyConstraintGroup() != nullptr && inDeltaTime > 0.0f)
+	{
+		const float bias_scale = GetLegacyVelocityBiasFactor() / inDeltaTime;
+		mLegacyPositionVelocityBias[0] = bias_scale * mU.Dot(mN1);
+		mLegacyPositionVelocityBias[1] = bias_scale * mU.Dot(mN2);
+		Quat diff = mBody2->GetRotation() * mInvInitialOrientation * mBody1->GetRotation().Conjugated();
+		mLegacyRotationVelocityBias = bias_scale * (2.0f * diff.EnsureWPositive().GetXYZ());
+	}
 	CalculateSlidingAxisAndPosition(rotation1);
 	CalculatePositionLimitsConstraintProperties(inDeltaTime);
 	CalculateMotorConstraintProperties(inDeltaTime);
@@ -295,7 +324,17 @@ bool SliderConstraint::SolveVelocityConstraint(float inDeltaTime)
 {
 	// Solve motor
 	bool motor = false;
-	if (mMotorConstraintPart.IsActive())
+	if (GetLegacyConstraintGroup() != nullptr && mLegacyMotor.IsEnabled())
+	{
+		const LegacyMotorStep step = mLegacyMotor.BeginLinearStep(mD, inDeltaTime);
+		float requested_lambda = 0.0f;
+		const float applied_lambda = mMotorConstraintPart.SolveVelocityConstraintLegacyMotor(
+			*mBody1, *mBody2, mWorldSpaceSliderAxis, step.mBias, step.mRelaxation,
+			step.mMinLambda, step.mMaxLambda, requested_lambda);
+		mLegacyMotor.FinishStep(requested_lambda, applied_lambda);
+		motor = applied_lambda != 0.0f;
+	}
+	else if (mMotorConstraintPart.IsActive())
 	{
 		switch (mMotorState)
 		{
@@ -315,10 +354,14 @@ bool SliderConstraint::SolveVelocityConstraint(float inDeltaTime)
 	}
 
 	// Solve position constraint along 2 axis
-	bool pos = mPositionConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2, mN1, mN2);
+	bool pos = GetLegacyConstraintGroup() != nullptr
+		? mPositionConstraintPart.SolveVelocityConstraintWithBias(*mBody1, *mBody2, mN1, mN2, mLegacyPositionVelocityBias, GetLegacyVelocityRelaxation())
+		: mPositionConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2, mN1, mN2);
 
 	// Solve rotation constraint
-	bool rot = mRotationConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2);
+	bool rot = GetLegacyConstraintGroup() != nullptr
+		? mRotationConstraintPart.SolveVelocityConstraintWithBias(*mBody1, *mBody2, mLegacyRotationVelocityBias, GetLegacyVelocityRelaxation())
+		: mRotationConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2);
 
 	// Solve limits along slider axis
 	bool limit = false;
@@ -450,6 +493,7 @@ void SliderConstraint::SaveState(StateRecorder &inStream) const
 	inStream.Write(mMotorState);
 	inStream.Write(mTargetVelocity);
 	inStream.Write(mTargetPosition);
+	mLegacyMotor.SaveState(inStream);
 }
 
 void SliderConstraint::RestoreState(StateRecorder &inStream)
@@ -464,6 +508,7 @@ void SliderConstraint::RestoreState(StateRecorder &inStream)
 	inStream.Read(mMotorState);
 	inStream.Read(mTargetVelocity);
 	inStream.Read(mTargetPosition);
+	mLegacyMotor.RestoreState(inStream);
 }
 
 Ref<ConstraintSettings> SliderConstraint::GetConstraintSettings() const

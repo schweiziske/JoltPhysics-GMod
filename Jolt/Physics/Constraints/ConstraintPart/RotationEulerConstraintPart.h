@@ -191,6 +191,15 @@ public:
 		return ApplyVelocityStep(ioBody1, ioBody2, lambda);
 	}
 
+	/// Velocity-only solve with a cached angular-error bias.
+	inline bool					SolveVelocityConstraintWithBias(Body &ioBody1, Body &ioBody2, Vec3Arg inBias, float inRelaxation)
+	{
+		Vec3 lambda = mEffectiveMass.Multiply3x3(
+			inRelaxation * (ioBody1.GetAngularVelocity() - ioBody2.GetAngularVelocity()) - inBias);
+		mTotalLambda += lambda;
+		return ApplyVelocityStep(ioBody1, ioBody2, lambda);
+	}
+
 	/// Iteratively update the position constraint. Makes sure C(...) = 0.
 	inline bool					SolvePositionConstraint(Body &ioBody1, Body &ioBody2, QuatArg inInvInitialOrientation, float inBaumgarte) const
 	{

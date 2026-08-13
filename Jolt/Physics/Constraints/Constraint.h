@@ -22,6 +22,7 @@ class StateRecorder;
 class StreamIn;
 class StreamOut;
 class LegacyConstraintGroup;
+class TwoBodyConstraint;
 #ifdef JPH_DEBUG_RENDERER
 class DebugRenderer;
 #endif // JPH_DEBUG_RENDERER
@@ -163,6 +164,28 @@ public:
 	uint64						GetUserData() const							{ return mUserData; }
 	void						SetUserData(uint64 inUserData)				{ mUserData = inUserData; }
 
+	/// Configure the Source/Havana-style velocity solve used by constraints in a legacy group.
+	/// bias = factor * position_error / dt, relaxation scales the relative-velocity term.
+	void						SetLegacyVelocitySolverSettings(float inBiasFactor, float inRelaxation)
+	{
+		mLegacyVelocityBiasFactor = inBiasFactor;
+		mLegacyVelocityRelaxation = inRelaxation;
+	}
+	float						GetLegacyVelocityBiasFactor() const		{ return mLegacyVelocityBiasFactor; }
+	float						GetLegacyVelocityRelaxation() const		{ return mLegacyVelocityRelaxation; }
+	void						SetLegacyBreakLimits(float inLinearLimit, float inAngularLimit)
+	{
+		mLegacyLinearBreakLimit = inLinearLimit;
+		mLegacyAngularBreakLimit = inAngularLimit;
+	}
+	bool						HasLegacyBreakLimits() const				{ return mLegacyLinearBreakLimit > 0.0f || mLegacyAngularBreakLimit > 0.0f; }
+	float						GetLegacyLinearBreakLimit() const		{ return mLegacyLinearBreakLimit; }
+	float						GetLegacyAngularBreakLimit() const		{ return mLegacyAngularBreakLimit; }
+	bool						ConsumeLegacyBroken()
+	{
+		return mLegacyBroken.exchange(false, std::memory_order_acq_rel);
+	}
+
 	/// Notify the constraint that the shape of a body has changed and that its center of mass has moved by inDeltaCOM.
 	/// Bodies don't know which constraints are connected to them so the user is responsible for notifying the relevant constraints when a body changes.
 	/// @param inBodyID ID of the body that has changed
@@ -228,6 +251,7 @@ protected:
 
 private:
 	friend class ConstraintManager;
+	friend class LegacyConstraintGroup;
 
 	/// Index that indicates this constraint is not in the constraint manager
 	static constexpr uint32		cInvalidConstraintIndex = 0xffffffff;
@@ -249,25 +273,39 @@ private:
 
 	/// User data value (can be used by application)
 	uint64						mUserData;
+	float						mLegacyVelocityBiasFactor = 0.0f;
+	float						mLegacyVelocityRelaxation = 1.0f;
+	float						mLegacyLinearBreakLimit = 0.0f;
+	float						mLegacyAngularBreakLimit = 0.0f;
+	std::atomic<bool>			mLegacyBroken{ false };
 	LegacyConstraintGroup *		mLegacyConstraintGroup = nullptr;
+
+	bool						CheckLegacyBreakAfterSolve(Vec3Arg inLinearVelocity1, Vec3Arg inAngularVelocity1, Vec3Arg inLinearVelocity2, Vec3Arg inAngularVelocity2, bool inRollbackOnBreak);
 };
 
 /// Coordinates Source's local-constraint-system ordering for a complete group
-/// of Jolt constraints. Jolt's outer velocity iterations become no-ops for
-/// members of this group.
+/// of Jolt constraints. The full Havana pass sequence runs once after Jolt has
+/// completed the island's contact/friction velocity iterations.
 class JPH_EXPORT LegacyConstraintGroup final
 {
 public:
+	~LegacyConstraintGroup();
+
 	void					AddConstraint(Constraint *inConstraint);
 	void					RemoveConstraint(Constraint *inConstraint);
 	void					PrepareVelocitySolve() { mSolvePending.store(true, std::memory_order_release); }
-	void					SetAdditionalIterations(uint inAdditionalIterations) { mAdditionalIterations = inAdditionalIterations; }
+	void					SetAdditionalIterations(int inAdditionalIterations) { mAdditionalIterations = inAdditionalIterations; }
+	int						GetAdditionalIterations() const { return mAdditionalIterations; }
+	size_t					GetConstraintCount() const { return mConstraints.size(); }
+	void					SetRollbackOnBreak(bool inRollbackOnBreak) { mRollbackOnBreak = inRollbackOnBreak; }
+	bool					IsSolverRepresentative(const Constraint *inCaller) const;
 	bool					SolveVelocityConstraints(Constraint *inCaller, float inDeltaTime);
 
 private:
 	std::vector<Constraint *>		mConstraints;
 	std::atomic<bool>			mSolvePending{ false };
-	uint						mAdditionalIterations = 0;
+	int							mAdditionalIterations = 0;
+	bool						mRollbackOnBreak = false;
 };
 
 JPH_NAMESPACE_END

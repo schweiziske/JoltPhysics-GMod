@@ -212,6 +212,18 @@ public:
 		return ApplyVelocityStep(ioBody1, ioBody2, lambda);
 	}
 
+	/// Apply one Havana-style motor/friction step. Unlike the normal Jolt motor this does not
+	/// accumulate a lambda across passes; Havana independently clamps every call to max_force * dt.
+	inline float				SolveVelocityConstraintLegacyMotor(Body &ioBody1, Body &ioBody2, Vec3Arg inWorldSpaceAxis, float inBias, float inRelaxation, float inMinLambda, float inMaxLambda, float &outRequestedLambda)
+	{
+		const float relative_velocity = inWorldSpaceAxis.Dot(ioBody1.GetAngularVelocity() - ioBody2.GetAngularVelocity());
+		outRequestedLambda = mEffectiveMass * (inRelaxation * relative_velocity - inBias);
+		const float applied_lambda = Clamp(outRequestedLambda, inMinLambda, inMaxLambda);
+		mTotalLambda += applied_lambda;
+		ApplyVelocityStep(ioBody1, ioBody2, applied_lambda);
+		return applied_lambda;
+	}
+
 	/// Return lagrange multiplier
 	float						GetTotalLambda() const
 	{

@@ -9,6 +9,7 @@
 #include <Jolt/Physics/Constraints/ConstraintPart/PointConstraintPart.h>
 #include <Jolt/Physics/Constraints/ConstraintPart/HingeRotationConstraintPart.h>
 #include <Jolt/Physics/Constraints/ConstraintPart/AngleConstraintPart.h>
+#include <Jolt/Physics/Constraints/LegacyMotorState.h>
 
 JPH_NAMESPACE_BEGIN
 
@@ -120,6 +121,11 @@ public:
 	EMotorState					GetMotorState() const									{ return mMotorState; }
 	void						SetTargetAngularVelocity(float inAngularVelocity)		{ mTargetAngularVelocity = inAngularVelocity; } ///< rad/s
 	float						GetTargetAngularVelocity() const						{ return mTargetAngularVelocity; }
+	void						SetLegacyMotor(float inAngularVelocity, float inMaxTorque, float inEpsilon = 1.0f)
+	{
+		mLegacyMotor.Configure(inAngularVelocity, inMaxTorque, inEpsilon);
+	}
+	const LegacyMotorState &	GetLegacyMotorState() const						{ return mLegacyMotor; }
 	void						SetTargetAngle(float inAngle)							{ mTargetAngle = mHasLimits? Clamp(inAngle, mLimitsMin, mLimitsMax) : inAngle; } ///< rad
 	float						GetTargetAngle() const									{ return mTargetAngle; }
 
@@ -200,6 +206,10 @@ private:
 	HingeRotationConstraintPart mRotationConstraintPart;
 	AngleConstraintPart			mRotationLimitsConstraintPart;
 	AngleConstraintPart			mMotorConstraintPart;
+	LegacyMotorState			mLegacyMotor;
+	bool						mLegacyMotorSolvePending = false;
+	Vec3						mLegacyPointVelocityBias { Vec3::sZero() };
+	HingeRotationConstraintPart::Vec2 mLegacyRotationVelocityBias { HingeRotationConstraintPart::Vec2::sZero() };
 };
 
 JPH_NAMESPACE_END

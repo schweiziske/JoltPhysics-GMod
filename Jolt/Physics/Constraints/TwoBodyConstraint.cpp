@@ -52,6 +52,15 @@ void TwoBodyConstraint::BuildIslands(uint32 inConstraintIndex, IslandBuilder &io
 
 uint TwoBodyConstraint::BuildIslandSplits(LargeIslandSplitter &ioSplitter) const
 {
+	// A Source local constraint system is a single controller that may touch every body in the
+	// group while solving any member. Keep all legacy members in Jolt's non-parallel split so a
+	// large island cannot execute pieces of one group concurrently.
+	if (GetLegacyConstraintGroup() != nullptr)
+	{
+		uint split = ioSplitter.AssignToNonParallelSplit(mBody1);
+		ioSplitter.AssignToNonParallelSplit(mBody2);
+		return split;
+	}
 	return ioSplitter.AssignSplit(mBody1, mBody2);
 }
 

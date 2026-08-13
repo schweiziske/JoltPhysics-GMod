@@ -203,6 +203,8 @@ private:
 	// Calculate properties needed for the position constraint
 	inline void					GetPositionConstraintProperties(Vec3 &outR1PlusU, Vec3 &outR2, Vec3 &outU) const;
 	bool						SolveRotationPositionConstraint(float inBaumgarte, float inDeadZone = 0.0f);
+	void						SetupLegacyRotationLimitVelocityConstraint(float inDeltaTime, QuatArg inConstraintBody1ToWorld, QuatArg inConstraintRotation);
+	bool						SolveLegacyRotationLimitVelocityConstraint();
 
 	// Sanitize the translation limits
 	inline void					UpdateTranslationLimits();
@@ -212,6 +214,7 @@ private:
 
 	// Update the cached state of which axis are free and which ones are fixed
 	inline void					UpdateFixedFreeAxis();
+	inline void					UpdateLegacyRotationLimitMode();
 
 	// Cache the state of mTranslationMotorActive
 	void						CacheTranslationMotorActive();
@@ -282,6 +285,10 @@ private:
 	// Individual constraint parts for rotation or a combined constraint part if rotation is fixed
 	SwingTwistConstraintPart	mSwingTwistConstraintPart;
 	RotationEulerConstraintPart	mRotationConstraintPart;
+	RotationEulerConstraintPart	mLegacyRotationLimitConstraintPart;
+	Vec3						mLegacyRotationLimitVelocityBias { Vec3::sZero() };
+	bool						mLegacyRotationLimitActive = false;
+	bool						mLegacyRotationLimitsExact = false;
 
 	// Motor or friction constraints
 	AxisConstraintPart			mMotorTranslationConstraintPart[3];

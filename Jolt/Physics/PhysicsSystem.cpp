@@ -1430,6 +1430,12 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					bool last_iteration, final_batch;
 					mLargeIslandSplitter.MarkBatchProcessed(split_island_index, constraints_begin, constraints_end, contacts_begin, contacts_end, last_iteration, final_batch);
 
+					// Legacy groups are forced into the non-parallel split. On the final velocity
+					// iteration this batch therefore owns the complete Source local system and can
+					// safely run it after contact/friction has finished.
+					if (last_iteration)
+						ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
+
 					// Save back the lambdas in the contact cache for the warm start of the next physics update
 					if (last_iteration)
 						mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
@@ -1533,6 +1539,11 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					if (!applied_impulse)
 						break;
 				}
+
+				// IVP orders static/dynamic friction before the local constraint-system controller.
+				// Run every Source group once after Jolt has completed the island's contact iterations
+				// so the final velocity cannot leave tiny wheel-angle limits violated for a frame.
+				ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
 
 				// Save back the lambdas in the contact cache for the warm start of the next physics update
 				mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);

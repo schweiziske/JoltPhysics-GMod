@@ -95,6 +95,13 @@ void PointConstraint::CalculateConstraintProperties()
 void PointConstraint::SetupVelocityConstraint(float inDeltaTime)
 {
 	CalculateConstraintProperties();
+	mLegacyPositionVelocityBias = Vec3::sZero();
+	if (GetLegacyConstraintGroup() != nullptr && inDeltaTime > 0.0f)
+	{
+		const Vec3 point1 = Vec3(mBody1->GetCenterOfMassPosition()) + mBody1->GetRotation() * mLocalSpacePosition1;
+		const Vec3 point2 = Vec3(mBody2->GetCenterOfMassPosition()) + mBody2->GetRotation() * mLocalSpacePosition2;
+		mLegacyPositionVelocityBias = GetLegacyVelocityBiasFactor() * (point2 - point1) / inDeltaTime;
+	}
 }
 
 void PointConstraint::ResetWarmStart()
@@ -110,6 +117,9 @@ void PointConstraint::WarmStartVelocityConstraint(float inWarmStartImpulseRatio)
 
 bool PointConstraint::SolveVelocityConstraint(float inDeltaTime)
 {
+	if (GetLegacyConstraintGroup() != nullptr)
+		return mPointConstraintPart.SolveVelocityConstraintWithBias(
+			*mBody1, *mBody2, mLegacyPositionVelocityBias, GetLegacyVelocityRelaxation());
 	return mPointConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2);
 }
 

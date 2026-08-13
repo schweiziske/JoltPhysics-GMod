@@ -188,6 +188,16 @@ public:
 		return ApplyVelocityStep(ioBody1, ioBody2, inN1, inN2, lambda);
 	}
 
+	/// Velocity-only solve with cached positional error expressed along both constrained axes.
+	inline bool					SolveVelocityConstraintWithBias(Body &ioBody1, Body &ioBody2, Vec3Arg inN1, Vec3Arg inN2, const Vec2 &inBias, float inRelaxation)
+	{
+		Vec2 lambda;
+		CalculateLagrangeMultiplier(ioBody1, ioBody2, inN1, inN2, lambda);
+		lambda = inRelaxation * lambda - mEffectiveMass * inBias;
+		mTotalLambda += lambda;
+		return ApplyVelocityStep(ioBody1, ioBody2, inN1, inN2, lambda);
+	}
+
 	/// Iteratively update the position constraint. Makes sure C(...) = 0.
 	/// All input vectors are in world space
 	inline bool					SolvePositionConstraint(Body &ioBody1, Body &ioBody2, Vec3Arg inU, Vec3Arg inN1, Vec3Arg inN2, float inBaumgarte) const

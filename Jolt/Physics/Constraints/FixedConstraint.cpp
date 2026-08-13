@@ -128,6 +128,20 @@ void FixedConstraint::SetupVelocityConstraint(float inDeltaTime)
 	Mat44 rotation2 = Mat44::sRotation(mBody2->GetRotation());
 	mRotationConstraintPart.CalculateConstraintProperties(*mBody1, rotation1, *mBody2, rotation2);
 	mPointConstraintPart.CalculateConstraintProperties(*mBody1, rotation1, mLocalSpacePosition1, *mBody2, rotation2, mLocalSpacePosition2);
+
+	mLegacyPositionVelocityBias = Vec3::sZero();
+	mLegacyRotationVelocityBias = Vec3::sZero();
+	mLegacyFirstVelocitySolve = GetLegacyConstraintGroup() != nullptr;
+	if (GetLegacyConstraintGroup() != nullptr && inDeltaTime > 0.0f)
+	{
+		const float bias_scale = 1.0f / inDeltaTime;
+		mLegacyPositionVelocityBias = bias_scale *
+			(Vec3(mBody2->GetCenterOfMassPosition() - mBody1->GetCenterOfMassPosition())
+				+ rotation2.Multiply3x3(mLocalSpacePosition2) - rotation1.Multiply3x3(mLocalSpacePosition1));
+
+		Quat diff = mBody2->GetRotation() * mInvInitialOrientation * mBody1->GetRotation().Conjugated();
+		mLegacyRotationVelocityBias = bias_scale * (2.0f * diff.EnsureWPositive().GetXYZ());
+	}
 }
 
 void FixedConstraint::ResetWarmStart()
@@ -145,6 +159,21 @@ void FixedConstraint::WarmStartVelocityConstraint(float inWarmStartImpulseRatio)
 
 bool FixedConstraint::SolveVelocityConstraint(float inDeltaTime)
 {
+	if (GetLegacyConstraintGroup() != nullptr)
+	{
+		const float relaxation = GetLegacyVelocityRelaxation();
+		// Havana's fixed setup pass multiplies drift correction by m_tau, but its
+		// subsequent local-system steps use the full cached correction. Preserve
+		// that source-level exception instead of treating all constraints uniformly.
+		const float bias_factor = mLegacyFirstVelocitySolve? GetLegacyVelocityBiasFactor() : 1.0f;
+		mLegacyFirstVelocitySolve = false;
+		bool rot = mRotationConstraintPart.SolveVelocityConstraintWithBias(
+			*mBody1, *mBody2, bias_factor * mLegacyRotationVelocityBias, relaxation);
+		bool pos = mPointConstraintPart.SolveVelocityConstraintWithBias(
+			*mBody1, *mBody2, bias_factor * mLegacyPositionVelocityBias, relaxation);
+		return rot || pos;
+	}
+
 	// Solve rotation constraint
 	bool rot = mRotationConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2);
 

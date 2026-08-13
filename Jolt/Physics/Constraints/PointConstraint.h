@@ -89,6 +89,7 @@ private:
 
 	// The constraint part
 	PointConstraintPart			mPointConstraintPart;
+	Vec3						mLegacyPositionVelocityBias { Vec3::sZero() };
 };
 
 JPH_NAMESPACE_END

@@ -161,6 +161,17 @@ public:
 		return ApplyVelocityStep(ioBody1, ioBody2, lambda);
 	}
 
+	/// Velocity-only solve with a cached positional-error bias. This mirrors legacy
+	/// local constraint systems which do not run a separate position projection pass.
+	inline bool					SolveVelocityConstraintWithBias(Body &ioBody1, Body &ioBody2, Vec3Arg inBias, float inRelaxation)
+	{
+		Vec3 relative_velocity = ioBody1.GetLinearVelocity() - mR1.Cross(ioBody1.GetAngularVelocity())
+			- ioBody2.GetLinearVelocity() + mR2.Cross(ioBody2.GetAngularVelocity());
+		Vec3 lambda = mEffectiveMass * (inRelaxation * relative_velocity - inBias);
+		mTotalLambda += lambda;
+		return ApplyVelocityStep(ioBody1, ioBody2, lambda);
+	}
+
 	/// Iteratively update the position constraint. Makes sure C(...) = 0.
 	/// @param ioBody1 The first body that this constraint is attached to
 	/// @param ioBody2 The second body that this constraint is attached to

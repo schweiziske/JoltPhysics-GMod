@@ -156,12 +156,24 @@ bool ConstraintManager::sSolveVelocityConstraints(Constraint **inActiveConstrain
 	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
-		if (LegacyConstraintGroup *group = c->GetLegacyConstraintGroup())
-			any_impulse_applied |= group->SolveVelocityConstraints(c, inDeltaTime);
-		else
+		if (c->GetLegacyConstraintGroup() == nullptr)
 			any_impulse_applied |= c->SolveVelocityConstraint(inDeltaTime);
 	}
 
+	return any_impulse_applied;
+}
+
+bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime)
+{
+	JPH_PROFILE_FUNCTION();
+
+	bool any_impulse_applied = false;
+	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
+	{
+		Constraint *c = inActiveConstraints[*constraint_idx];
+		if (LegacyConstraintGroup *group = c->GetLegacyConstraintGroup(); group != nullptr && group->IsSolverRepresentative(c))
+			any_impulse_applied |= group->SolveVelocityConstraints(c, inDeltaTime);
+	}
 	return any_impulse_applied;
 }
 

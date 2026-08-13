@@ -116,6 +116,9 @@ HingeConstraint::HingeConstraint(Body &inBody1, Body &inBody2, const HingeConstr
 
 	// Store spring settings
 	SetLimitsSpringSettings(inSettings.mLimitsSpringSettings);
+
+	// Havana constructs m_ref_position at zero and only unwraps it against the creation angle.
+	mLegacyMotor.InitializeAngularReference(-GetCurrentAngle());
 }
 
 void HingeConstraint::NotifyShapeChanged(const BodyID &inBodyID, Vec3Arg inDeltaCOM)
@@ -164,7 +167,7 @@ void HingeConstraint::SetLimits(float inLimitsMin, float inLimitsMax)
 
 void HingeConstraint::CalculateA1AndTheta()
 {
-	if (mHasLimits || mMotorState != EMotorState::Off || mMaxFrictionTorque > 0.0f)
+	if (mHasLimits || mMotorState != EMotorState::Off || mMaxFrictionTorque > 0.0f || mLegacyMotor.IsEnabled())
 	{
 		Quat rotation1 = mBody1->GetRotation();
 
@@ -197,13 +200,28 @@ void HingeConstraint::CalculateRotationLimitsConstraintProperties(float inDeltaT
 {
 	// Apply constraint if outside of limits
 	if (mHasLimits && (mTheta <= mLimitsMin || mTheta >= mLimitsMax))
-		mRotationLimitsConstraintPart.CalculateConstraintPropertiesWithSettingsForLimit(inDeltaTime, *mBody1, *mBody2, mA1, 0.0f, GetSmallestAngleToLimit(), mLimitsSpringSettings);
+	{
+		const float position_error = GetSmallestAngleToLimit();
+		// Havana's limit utility carries limit error in the velocity solve. It has its
+		// own limit tau (1 for VPhysics hinges), independent of constraint.strength.
+		const float legacy_bias = GetLegacyConstraintGroup() != nullptr && inDeltaTime > 0.0f
+			? position_error / inDeltaTime
+			: 0.0f;
+		mRotationLimitsConstraintPart.CalculateConstraintPropertiesWithSettingsForLimit(
+			inDeltaTime, *mBody1, *mBody2, mA1, legacy_bias, position_error, mLimitsSpringSettings);
+	}
 	else
 		mRotationLimitsConstraintPart.Deactivate();
 }
 
 void HingeConstraint::CalculateMotorConstraintProperties(float inDeltaTime)
 {
+	if (GetLegacyConstraintGroup() != nullptr && mLegacyMotor.IsEnabled())
+	{
+		mMotorConstraintPart.CalculateConstraintProperties(*mBody1, *mBody2, mA1);
+		return;
+	}
+
 	switch (mMotorState)
 	{
 	case EMotorState::Off:
@@ -240,9 +258,20 @@ void HingeConstraint::SetupVelocityConstraint(float inDeltaTime)
 	Mat44 rotation2 = Mat44::sRotation(mBody2->GetRotation());
 	mPointConstraintPart.CalculateConstraintProperties(*mBody1, rotation1, mLocalSpacePosition1, *mBody2, rotation2, mLocalSpacePosition2);
 	mRotationConstraintPart.CalculateConstraintProperties(*mBody1, rotation1, rotation1.Multiply3x3(mLocalSpaceHingeAxis1), *mBody2, rotation2, rotation2.Multiply3x3(mLocalSpaceHingeAxis2));
+	mLegacyPointVelocityBias = Vec3::sZero();
+	mLegacyRotationVelocityBias.SetZero();
+	if (GetLegacyConstraintGroup() != nullptr && inDeltaTime > 0.0f)
+	{
+		const float bias_scale = GetLegacyVelocityBiasFactor() / inDeltaTime;
+		mLegacyPointVelocityBias = bias_scale *
+			(Vec3(mBody2->GetCenterOfMassPosition() - mBody1->GetCenterOfMassPosition())
+				+ rotation2.Multiply3x3(mLocalSpacePosition2) - rotation1.Multiply3x3(mLocalSpacePosition1));
+		mLegacyRotationVelocityBias = bias_scale * mRotationConstraintPart.GetPositionError();
+	}
 	CalculateA1AndTheta();
 	CalculateRotationLimitsConstraintProperties(inDeltaTime);
 	CalculateMotorConstraintProperties(inDeltaTime);
+	mLegacyMotorSolvePending = mLegacyMotor.IsEnabled();
 }
 
 void HingeConstraint::ResetWarmStart()
@@ -280,7 +309,23 @@ bool HingeConstraint::SolveVelocityConstraint(float inDeltaTime)
 {
 	// Solve motor
 	bool motor = false;
-	if (mMotorConstraintPart.IsActive())
+	if (GetLegacyConstraintGroup() != nullptr && mLegacyMotor.IsEnabled())
+	{
+		// Havana's hinge motor is part of setup_and_step_constraint only. The eight later
+		// local-system step_constraint calls must not fall through to Jolt's normal motor.
+		if (mLegacyMotorSolvePending)
+		{
+			mLegacyMotorSolvePending = false;
+			const LegacyMotorStep step = mLegacyMotor.BeginAngularStep(-mTheta, inDeltaTime);
+			float requested_lambda = 0.0f;
+			const float applied_lambda = mMotorConstraintPart.SolveVelocityConstraintLegacyMotor(
+				*mBody1, *mBody2, mA1, step.mBias, step.mRelaxation,
+				step.mMinLambda, step.mMaxLambda, requested_lambda);
+			mLegacyMotor.FinishStep(requested_lambda, applied_lambda);
+			motor = applied_lambda != 0.0f;
+		}
+	}
+	else if (mMotorConstraintPart.IsActive())
 	{
 		switch (mMotorState)
 		{
@@ -300,10 +345,14 @@ bool HingeConstraint::SolveVelocityConstraint(float inDeltaTime)
 	}
 
 	// Solve point constraint
-	bool pos = mPointConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2);
+	bool pos = GetLegacyConstraintGroup() != nullptr
+		? mPointConstraintPart.SolveVelocityConstraintWithBias(*mBody1, *mBody2, mLegacyPointVelocityBias, GetLegacyVelocityRelaxation())
+		: mPointConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2);
 
 	// Solve rotation constraint
-	bool rot = mRotationConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2);
+	bool rot = GetLegacyConstraintGroup() != nullptr
+		? mRotationConstraintPart.SolveVelocityConstraintWithBias(*mBody1, *mBody2, mLegacyRotationVelocityBias, GetLegacyVelocityRelaxation())
+		: mRotationConstraintPart.SolveVelocityConstraint(*mBody1, *mBody2);
 
 	// Solve rotation limits
 	bool limit = false;
@@ -402,6 +451,7 @@ void HingeConstraint::SaveState(StateRecorder &inStream) const
 	inStream.Write(mMotorState);
 	inStream.Write(mTargetAngularVelocity);
 	inStream.Write(mTargetAngle);
+	mLegacyMotor.SaveState(inStream);
 }
 
 void HingeConstraint::RestoreState(StateRecorder &inStream)
@@ -416,6 +466,8 @@ void HingeConstraint::RestoreState(StateRecorder &inStream)
 	inStream.Read(mMotorState);
 	inStream.Read(mTargetAngularVelocity);
 	inStream.Read(mTargetAngle);
+	mLegacyMotor.RestoreState(inStream);
+	mLegacyMotorSolvePending = false;
 }
 
 
