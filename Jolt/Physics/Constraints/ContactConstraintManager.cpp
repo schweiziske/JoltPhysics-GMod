@@ -37,7 +37,7 @@ bool ContactConstraintManager::sDrawContactManifolds = false;
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <EMotionType Type1, EMotionType Type2>
-JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::CalculateFrictionAndNonPenetrationConstraintProperties(float inDeltaTime, Vec3Arg inGravity, const Body &inBody1, const Body &inBody2, float inInvM1, float inInvM2, Mat44Arg inInvI1, Mat44Arg inInvI2, RVec3Arg inWorldSpacePosition1, RVec3Arg inWorldSpacePosition2, Vec3Arg inWorldSpaceNormal, Vec3Arg inWorldSpaceTangent1, Vec3Arg inWorldSpaceTangent2, const ContactSettings &inSettings, float inMinVelocityForRestitution)
+JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::CalculateFrictionAndNonPenetrationConstraintProperties(float inDeltaTime, Vec3Arg inGravity, const Body &inBody1, const Body &inBody2, float inInvM1, float inInvM2, Mat44Arg inInvI1, Mat44Arg inInvI2, RVec3Arg inWorldSpacePosition1, RVec3Arg inWorldSpacePosition2, Vec3Arg inWorldSpaceNormal, Vec3Arg inWorldSpaceTangent1, Vec3Arg inWorldSpaceTangent2, const ContactSettings &inSettings, float inMinVelocityForRestitution, float inContactSeparationTarget)
 {
 	JPH_DET_LOG("CalculateFrictionAndNonPenetrationConstraintProperties: p1: " << inWorldSpacePosition1 << " p2: " << inWorldSpacePosition2
 		<< " normal: " << inWorldSpaceNormal << " tangent1: " << inWorldSpaceTangent1 << " tangent2: " << inWorldSpaceTangent2
@@ -67,8 +67,9 @@ JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::Calcu
 	}
 	float normal_velocity = relative_velocity.Dot(inWorldSpaceNormal);
 
-	// How much the shapes are penetrating (> 0 if penetrating, < 0 if separated)
-	float penetration = Vec3(inWorldSpacePosition1 - inWorldSpacePosition2).Dot(inWorldSpaceNormal);
+	// How far the contact is inside its desired separation boundary (> 0 if too close, < 0 if
+	// farther apart). A zero target preserves Jolt's native geometric-contact behavior.
+	float penetration = Vec3(inWorldSpacePosition1 - inWorldSpacePosition2).Dot(inWorldSpaceNormal) + inContactSeparationTarget;
 
 	// If there is no penetration, this is a speculative contact and we will apply a bias to the contact constraint
 	// so that the constraint becomes relative_velocity . contact normal > -penetration / delta_time
@@ -930,7 +931,7 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 				wcp.mFrictionConstraint2.SetTotalLambda(ccp.mFrictionLambda[1]);
 				wcp.mContactPoint = &ccp;
 
-				wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, world_space_normal, t1, t2, settings, min_velocity_for_restitution);
+				wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, world_space_normal, t1, t2, settings, min_velocity_for_restitution, mPhysicsSettings.mContactSeparationTarget);
 			}
 
 		#ifdef JPH_DEBUG_RENDERER
@@ -1238,7 +1239,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 			wcp.mContactPoint = &cp;
 
 			// Setup velocity constraint
-			wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, inManifold.mWorldSpaceNormal, t1, t2, settings, mPhysicsSettings.mMinVelocityForRestitution);
+			wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, inManifold.mWorldSpaceNormal, t1, t2, settings, mPhysicsSettings.mMinVelocityForRestitution, mPhysicsSettings.mContactSeparationTarget);
 		}
 
 	#ifdef JPH_DEBUG_RENDERER
@@ -1831,10 +1832,10 @@ bool ContactConstraintManager::sSolvePositionConstraint(ContactConstraintBase &i
 		RVec3 p1 = transform1 * Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mPosition1);
 		RVec3 p2 = transform2 * Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mPosition2);
 
-		// Calculate separation along the normal (negative if interpenetrating)
+		// Calculate separation from the desired contact boundary (negative if too close)
 		// Allow a little penetration by default (PhysicsSettings::mPenetrationSlop) to avoid jittering between contact/no-contact which wipes out the contact cache and warm start impulses
 		// Clamp penetration to a max PhysicsSettings::mMaxPenetrationDistance so that we don't apply a huge impulse if we're penetrating a lot
-		float separation = max(Vec3(p2 - p1).Dot(ws_normal) + inSettings.mPenetrationSlop, -inSettings.mMaxPenetrationDistance);
+		float separation = max(Vec3(p2 - p1).Dot(ws_normal) - inSettings.mContactSeparationTarget + inSettings.mPenetrationSlop, -inSettings.mMaxPenetrationDistance);
 
 		// Only enforce constraint when separation < 0 (otherwise we're apart)
 		if (separation < 0.0f)

@@ -62,6 +62,11 @@ public:
 	/// The type of swing constraint that we want to use.
 	ESwingType					mSwingType = ESwingType::Cone;
 
+	/// Use the historical Source/GMod grouped position recovery for tiny angular-only wheel limits.
+	/// This keeps the normal SixDOF velocity solver and ignores position error inside a 0.5 degree
+	/// dead zone instead of selecting the newer exact micro-angle velocity-only path.
+	bool						mUseLegacyRotationPositionCorrection = false;
+
 	/// Limits.
 	/// For translation: Min and max linear limits in m (0 is frame of body 1 and 2 coincide).
 	/// For rotation: Min and max angular limits in rad (0 is frame of body 1 and 2 coincide). See comments at Axis enum for limit ranges.
@@ -122,6 +127,7 @@ public:
 	virtual bool				SolveVelocityConstraint(float inDeltaTime) override;
 	virtual bool				SolvePositionConstraint(float inDeltaTime, float inBaumgarte) override;
 	virtual bool				SolvePositionConstraintInLegacyGroup(float inDeltaTime, float inBaumgarte) override;
+	virtual bool				RequiresPostContactLegacySolve() const override				{ return mLegacyRotationLimitsExact; }
 #ifdef JPH_DEBUG_RENDERER
 	virtual void				DrawConstraint(DebugRenderer *inRenderer) const override;
 	virtual void				DrawConstraintLimits(DebugRenderer *inRenderer) const override;
@@ -289,6 +295,7 @@ private:
 	Vec3						mLegacyRotationLimitVelocityBias { Vec3::sZero() };
 	bool						mLegacyRotationLimitActive = false;
 	bool						mLegacyRotationLimitsExact = false;
+	bool						mUseLegacyRotationPositionCorrection = false;
 
 	// Motor or friction constraints
 	AxisConstraintPart			mMotorTranslationConstraintPart[3];

@@ -209,6 +209,13 @@ public:
 	/// The default is disabled because the group owns its velocity ordering and
 	/// most Source group constraints must not run Jolt's normal position pass.
 	virtual bool				SolvePositionConstraintInLegacyGroup(float inDeltaTime, float inBaumgarte) { return false; }
+	/// Optional correction that runs only after Jolt actually changed poses for contact penetration.
+	virtual bool				SolvePostContactPositionConstraintInLegacyGroup(float inDeltaTime, float inBaumgarte) { return false; }
+	/// Optional velocity correction for a predictive member of a mixed legacy group after contacts.
+	virtual bool				SolvePostContactVelocityConstraintInLegacyGroup(float inDeltaTime) { return false; }
+	/// True only when predictive activation must be rebuilt after contact impulses. A legacy group
+	/// takes the post-contact path only when every active member opts in.
+	virtual bool				RequiresPostContactLegacySolve() const { return false; }
 	///@}
 
 	/// Link bodies that are connected by this constraint in the island builder
@@ -284,8 +291,9 @@ private:
 };
 
 /// Coordinates Source's local-constraint-system ordering for a complete group
-/// of Jolt constraints. The full Havana pass sequence runs once after Jolt has
-/// completed the island's contact/friction velocity iterations.
+/// of Jolt constraints. Ordinary mixed groups retain the adapter's controller
+/// pass; pure predictive micro-angle groups can opt into a refreshed
+/// post-contact pass.
 class JPH_EXPORT LegacyConstraintGroup final
 {
 public:
@@ -298,6 +306,7 @@ public:
 	int						GetAdditionalIterations() const { return mAdditionalIterations; }
 	size_t					GetConstraintCount() const { return mConstraints.size(); }
 	void					SetRollbackOnBreak(bool inRollbackOnBreak) { mRollbackOnBreak = inRollbackOnBreak; }
+	bool					RequiresPostContactSolve() const;
 	bool					IsSolverRepresentative(const Constraint *inCaller) const;
 	bool					SolveVelocityConstraints(Constraint *inCaller, float inDeltaTime);
 

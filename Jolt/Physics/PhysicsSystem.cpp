@@ -1424,17 +1424,25 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 						// Solve velocity constraints
 						ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
 						mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
+						// IVP runs its local constraint controller after dynamic friction and before the
+						// later static-friction convergence. A legacy group owns an internal complete
+						// Havana pass and mSolvePending ensures it runs only once in this physics step.
+						ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
 					}
 
 					// Mark the batch as processed
 					bool last_iteration, final_batch;
 					mLargeIslandSplitter.MarkBatchProcessed(split_island_index, constraints_begin, constraints_end, contacts_begin, contacts_end, last_iteration, final_batch);
 
-					// Legacy groups are forced into the non-parallel split. On the final velocity
-					// iteration this batch therefore owns the complete Source local system and can
-					// safely run it after contact/friction has finished.
+					// A pure predictive micro-angle group must see the final contact velocity. Rebuild and
+					// solve it only after the contact iterations have converged; mixed Weld/Rope groups
+					// stay in the ordinary Source controller stage above.
 					if (last_iteration)
-						ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
+					{
+						ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
+						if (contacts_begin != contacts_end)
+							ConstraintManager::sSolvePostContactLegacyVelocityMembers(active_constraints, constraints_begin, constraints_end, delta_time);
+					}
 
 					// Save back the lambdas in the contact cache for the warm start of the next physics update
 					if (last_iteration)
@@ -1536,14 +1544,17 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				{
 					bool applied_impulse = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
 					applied_impulse |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
+					applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
 					if (!applied_impulse)
 						break;
 				}
 
-				// IVP orders static/dynamic friction before the local constraint-system controller.
-				// Run every Source group once after Jolt has completed the island's contact iterations
-				// so the final velocity cannot leave tiny wheel-angle limits violated for a frame.
-				ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
+				// Jolt combines contact pressure and friction in its iterative contact solver. Source's
+				// tiny wheel-angle controllers need one refreshed Havana pass after that convergence,
+				// otherwise later contact iterations can leave the limit violated for a whole frame.
+				ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
+				if (contacts_begin != contacts_end)
+					ConstraintManager::sSolvePostContactLegacyVelocityMembers(active_constraints, constraints_begin, constraints_end, delta_time);
 
 				// Save back the lambdas in the contact cache for the warm start of the next physics update
 				mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
@@ -2564,7 +2575,14 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
 
 					// Solve the batch
 					ConstraintManager::sSolvePositionConstraints(active_constraints, constraints_begin, constraints_end, delta_time, baumgarte);
-					mContactManager.SolvePositionConstraints(contacts_begin, contacts_end);
+					if (contacts_begin != contacts_end)
+					{
+						mContactManager.SolvePositionConstraints(contacts_begin, contacts_end);
+						// A resting contact can stop producing a new positional impulse before the
+						// micro-angle correction has converged. Keep the narrow legacy clamp in every
+						// position iteration that owns contacts, not only the first changed-contact pass.
+						ConstraintManager::sSolvePostContactLegacyPositionConstraints(active_constraints, constraints_begin, constraints_end, delta_time, baumgarte);
+					}
 
 					// Mark the batch as processed
 					bool last_iteration, final_batch;
@@ -2629,7 +2647,12 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
 				for (uint position_step = 0; position_step < num_position_steps; ++position_step)
 				{
 					bool applied_impulse = ConstraintManager::sSolvePositionConstraints(active_constraints, constraints_begin, constraints_end, delta_time, baumgarte);
-					applied_impulse |= mContactManager.SolvePositionConstraints(contacts_begin, contacts_end);
+					if (contacts_begin != contacts_end)
+					{
+						applied_impulse |= mContactManager.SolvePositionConstraints(contacts_begin, contacts_end);
+						applied_impulse |= ConstraintManager::sSolvePostContactLegacyPositionConstraints(
+							active_constraints, constraints_begin, constraints_end, delta_time, baumgarte);
+					}
 					if (!applied_impulse)
 						break;
 				}

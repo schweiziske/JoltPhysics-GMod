@@ -29,6 +29,7 @@ JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(SixDOFConstraintSettings)
 	JPH_ADD_ATTRIBUTE(SixDOFConstraintSettings, mAxisY2)
 	JPH_ADD_ATTRIBUTE(SixDOFConstraintSettings, mMaxFriction)
 	JPH_ADD_ENUM_ATTRIBUTE(SixDOFConstraintSettings, mSwingType)
+	JPH_ADD_ATTRIBUTE(SixDOFConstraintSettings, mUseLegacyRotationPositionCorrection)
 	JPH_ADD_ATTRIBUTE(SixDOFConstraintSettings, mLimitMin)
 	JPH_ADD_ATTRIBUTE(SixDOFConstraintSettings, mLimitMax)
 	JPH_ADD_ATTRIBUTE(SixDOFConstraintSettings, mLimitsSpringSettings)
@@ -48,6 +49,7 @@ void SixDOFConstraintSettings::SaveBinaryState(StreamOut &inStream) const
 	inStream.Write(mAxisY2);
 	inStream.Write(mMaxFriction);
 	inStream.Write(mSwingType);
+	inStream.Write(mUseLegacyRotationPositionCorrection);
 	inStream.Write(mLimitMin);
 	inStream.Write(mLimitMax);
 	for (const SpringSettings &s : mLimitsSpringSettings)
@@ -69,6 +71,7 @@ void SixDOFConstraintSettings::RestoreBinaryState(StreamIn &inStream)
 	inStream.Read(mAxisY2);
 	inStream.Read(mMaxFriction);
 	inStream.Read(mSwingType);
+	inStream.Read(mUseLegacyRotationPositionCorrection);
 	inStream.Read(mLimitMin);
 	inStream.Read(mLimitMax);
 	for (SpringSettings &s : mLimitsSpringSettings)
@@ -154,7 +157,7 @@ void SixDOFConstraint::UpdateFixedFreeAxis()
 void SixDOFConstraint::UpdateLegacyRotationLimitMode()
 {
 	constexpr float cJoltLockedAngle = DegreesToRadians(0.5f);
-	mLegacyRotationLimitsExact = true;
+	mLegacyRotationLimitsExact = !mUseLegacyRotationPositionCorrection;
 	for (int axis = EAxis::RotationX; axis <= EAxis::RotationZ; ++axis)
 		mLegacyRotationLimitsExact &= mLimitMin[axis] < mLimitMax[axis]
 			&& mLimitMin[axis] > -cJoltLockedAngle
@@ -196,6 +199,7 @@ SixDOFConstraint::SixDOFConstraint(Body &inBody1, Body &inBody2, const SixDOFCon
 	memcpy(mLimitMin, inSettings.mLimitMin, sizeof(mLimitMin));
 	memcpy(mLimitMax, inSettings.mLimitMax, sizeof(mLimitMax));
 	memcpy(mLimitsSpringSettings, inSettings.mLimitsSpringSettings, sizeof(mLimitsSpringSettings));
+	mUseLegacyRotationPositionCorrection = inSettings.mUseLegacyRotationPositionCorrection;
 	UpdateTranslationLimits();
 	UpdateRotationLimits();
 	UpdateFixedFreeAxis();
@@ -1022,6 +1026,7 @@ Ref<ConstraintSettings> SixDOFConstraint::GetConstraintSettings() const
 	settings->mAxisX2 = mConstraintToBody2.RotateAxisX();
 	settings->mAxisY2 = mConstraintToBody2.RotateAxisY();
 	settings->mSwingType = mSwingTwistConstraintPart.GetSwingType();
+	settings->mUseLegacyRotationPositionCorrection = mUseLegacyRotationPositionCorrection;
 	memcpy(settings->mLimitMin, mLimitMin, sizeof(mLimitMin));
 	memcpy(settings->mLimitMax, mLimitMax, sizeof(mLimitMax));
 	memcpy(settings->mMaxFriction, mMaxFriction, sizeof(mMaxFriction));

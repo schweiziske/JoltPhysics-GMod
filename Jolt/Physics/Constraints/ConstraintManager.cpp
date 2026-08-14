@@ -163,7 +163,7 @@ bool ConstraintManager::sSolveVelocityConstraints(Constraint **inActiveConstrain
 	return any_impulse_applied;
 }
 
-bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime)
+bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, bool inPostContactOnly)
 {
 	JPH_PROFILE_FUNCTION();
 
@@ -171,8 +171,30 @@ bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveCon
 	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
-		if (LegacyConstraintGroup *group = c->GetLegacyConstraintGroup(); group != nullptr && group->IsSolverRepresentative(c))
+		if (LegacyConstraintGroup *group = c->GetLegacyConstraintGroup();
+			group != nullptr
+			&& group->RequiresPostContactSolve() == inPostContactOnly
+			&& group->IsSolverRepresentative(c))
 			any_impulse_applied |= group->SolveVelocityConstraints(c, inDeltaTime);
+	}
+	return any_impulse_applied;
+}
+
+bool ConstraintManager::sSolvePostContactLegacyVelocityMembers(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime)
+{
+	JPH_PROFILE_FUNCTION();
+
+	bool any_impulse_applied = false;
+	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
+	{
+		Constraint *c = inActiveConstraints[*constraint_idx];
+		LegacyConstraintGroup *group = c->GetLegacyConstraintGroup();
+		if (group == nullptr || !c->RequiresPostContactLegacySolve())
+			continue;
+
+		// The LCS already completed its normal Havana pass. Correct only this predictive member
+		// against the final contact velocity; running a complete mixed group here regressed Dukes.
+		any_impulse_applied |= c->SolvePostContactVelocityConstraintInLegacyGroup(inDeltaTime);
 	}
 	return any_impulse_applied;
 }
@@ -186,12 +208,33 @@ bool ConstraintManager::sSolvePositionConstraints(Constraint **inActiveConstrain
 	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
-		if (c->GetLegacyConstraintGroup())
-			any_impulse_applied |= c->SolvePositionConstraintInLegacyGroup(inDeltaTime, inBaumgarte);
+		if (LegacyConstraintGroup *group = c->GetLegacyConstraintGroup())
+		{
+			if (!group->RequiresPostContactSolve())
+				any_impulse_applied |= c->SolvePositionConstraintInLegacyGroup(inDeltaTime, inBaumgarte);
+		}
 		else
 			any_impulse_applied |= c->SolvePositionConstraint(inDeltaTime, inBaumgarte);
 	}
 
+	return any_impulse_applied;
+}
+
+bool ConstraintManager::sSolvePostContactLegacyPositionConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, float inBaumgarte)
+{
+	JPH_PROFILE_FUNCTION();
+
+	bool any_impulse_applied = false;
+	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
+	{
+		Constraint *c = inActiveConstraints[*constraint_idx];
+		// Keep a mixed Source LCS in its ordinary velocity-controller stage, but still let an
+		// individual predictive micro-angle member repair the pose change made by Jolt's contact
+		// position pass. simfphys rear wheels live in the same Weld/Rope group as the chassis, so
+		// classifying this correction by the whole group leaves their +/-0.01 degree limits open.
+		if (c->GetLegacyConstraintGroup() != nullptr && c->RequiresPostContactLegacySolve())
+			any_impulse_applied |= c->SolvePostContactPositionConstraintInLegacyGroup(inDeltaTime, inBaumgarte);
+	}
 	return any_impulse_applied;
 }
 

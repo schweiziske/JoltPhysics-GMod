@@ -65,12 +65,20 @@ public:
 	/// This function is called multiple times to iteratively come to a solution that meets all velocity constraints
 	static bool				sSolveVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime);
 
-	/// Source runs its local constraint systems as controllers after contact/friction has updated
-	/// velocities. Execute each legacy group once, after Jolt's outer contact iterations.
-	static bool				sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime);
+	/// Execute pure predictive micro-angle legacy groups after Jolt's outer contact iterations.
+	/// Mixed Source systems retain their ordinary controller pass.
+	static bool				sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, bool inPostContactOnly);
+
+	/// Refresh predictive micro-angle members after contacts. This removes contact-generated angular
+	/// velocity without moving an otherwise mixed Weld/Rope group to the post-contact controller stage.
+	static bool				sSolvePostContactLegacyVelocityMembers(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime);
 
 	/// This function is called multiple times to iteratively come to a solution that meets all position constraints
 	static bool				sSolvePositionConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, float inBaumgarte);
+
+	/// Re-apply predictive legacy angular limits after Jolt's contact position correction, including
+	/// individual micro-angle members of an otherwise mixed Source constraint system.
+	static bool				sSolvePostContactLegacyPositionConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, float inBaumgarte);
 
 #ifdef JPH_DEBUG_RENDERER
 	/// Draw all constraints

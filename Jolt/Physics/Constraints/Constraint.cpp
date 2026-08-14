@@ -167,6 +167,20 @@ bool LegacyConstraintGroup::IsSolverRepresentative(const Constraint *inCaller) c
 	return false;
 }
 
+bool LegacyConstraintGroup::RequiresPostContactSolve() const
+{
+	bool has_active_constraint = false;
+	for (Constraint *constraint : mConstraints)
+		if (constraint->IsActive())
+		{
+			has_active_constraint = true;
+			if (!constraint->RequiresPostContactLegacySolve())
+				return false;
+		}
+
+	return has_active_constraint;
+}
+
 bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float inDeltaTime)
 {
 	if (!IsSolverRepresentative(inCaller))
@@ -174,11 +188,9 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 	if (!mSolvePending.exchange(false, std::memory_order_acq_rel))
 		return false;
 
-	// ConstraintManager performs the ordinary setup before contact/friction solving. Source local
-	// constraint systems are controllers that run afterwards, so their predictive limits must see
-	// the velocities produced by those contacts. Rebuild every member's velocity state here; merely
-	// postponing SolveVelocityConstraint leaves a one-frame hole whenever a previously inactive
-	// limit is crossed by a contact impulse (notably a simfphys wheel striking a curb).
+	// Source constructs every constraint's VMQ data when the local controller runs. The adapter's
+	// earlier parallel setup job is only a Jolt lifecycle requirement; rebuild at the actual Source
+	// controller stage so predictive limits and cached Jacobians observe the preceding contact pass.
 	for (Constraint *constraint : mConstraints)
 		if (constraint->IsActive())
 			constraint->SetupVelocityConstraint(inDeltaTime);
@@ -216,19 +228,21 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 				solveConstraint(*it);
 	};
 
-	// Source performs one setup solve, followed by m_n_iterations passes;
-	// m_n_iterations is additionalIterations + 2 and each pass has two
-	// reverse/forward stages.
+	// GMod's shipped Havana performs one setup solve followed by m_n_iterations. Each iteration
+	// runs two identical tau/damping phases, and every phase scans reverse then forward. Therefore
+	// a default private LCS performs 1 + 2 * 2 * 2 = 9 solves, not 5; a group with four additional
+	// iterations performs 25 solves. The duplicated phase is observable and must not be collapsed.
 	solveForward();
 	// Havana stores m_n_iterations as signed additionalIterations + 2. Negative input is not
 	// clamped: -1 performs one iteration, while <= -2 performs none after the setup solve.
 	const int64 num_iterations = int64(mAdditionalIterations) + 2;
 	for (int64 iteration = 0; iteration < num_iterations && !groupBroken; ++iteration)
 	{
-		solveReverse();
-		solveForward();
-		solveReverse();
-		solveForward();
+		for (int phase = 0; phase < 2 && !groupBroken; ++phase)
+		{
+			solveReverse();
+			solveForward();
+		}
 	}
 
 	(void)inCaller;

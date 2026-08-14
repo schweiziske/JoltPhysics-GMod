@@ -49,6 +49,11 @@ struct PhysicsSettings
 	/// step which may not be the actual closest points by the time the two objects hit (unit: meters)
 	float		mSpeculativeContactDistance = 0.02f;
 
+	/// Desired separation between the geometric surfaces at a contact. This shifts the velocity
+	/// and position contact constraints outwards while leaving mPenetrationSlop available to the
+	/// CCD path. Must be non-negative and no larger than mSpeculativeContactDistance (unit: meters)
+	float		mContactSeparationTarget = 0.0f;
+
 	/// How much bodies are allowed to sink into each other (unit: meters)
 	float		mPenetrationSlop = 0.02f;
 
