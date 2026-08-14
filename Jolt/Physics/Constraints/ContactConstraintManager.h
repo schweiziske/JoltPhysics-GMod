@@ -178,6 +178,10 @@ public:
 	template <class MotionPropertiesCallback>
 	void						WarmStartVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inWarmStartImpulseRatio, MotionPropertiesCallback &ioCallback);
 
+	/// Register affected bodies with the solver-step calculator without replaying cached impulses.
+	template <class MotionPropertiesCallback>
+	void						RegisterVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, MotionPropertiesCallback &ioCallback);
+
 	/// Solve velocity constraints, when almost nothing changes this should only apply very small impulses
 	/// since we're warm starting with the total impulse applied in the last frame above.
 	///
@@ -209,6 +213,14 @@ public:
 	///
 	/// Restitution is only applied when v_n^- is large enough and the points are moving towards collision
 	bool						SolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	bool						SolveFrictionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	bool						SolveNonPenetrationConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	void						ResetFrictionLambdas(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	void						ResetNonPenetrationLambdas(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+
+
+	/// True when any contact in this range is predicted to enter IVP's impact distance this update.
+	bool						AreAnyContactsImpacting(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
 
 	/// Save back the lambdas to the contact cache for the next warm start
 	void						StoreAppliedImpulses(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
@@ -469,6 +481,7 @@ private:
 		float					mInvMass2;
 		float					mInvInertiaScale2;
 		uint32					mNumContactPoints;
+		bool					mContactImpacting = false;
 	};
 
 	/// Contact constraint class, used for solving penetrations
@@ -520,8 +533,17 @@ private:
 	static void					sWarmStartConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inWarmStartImpulseRatio);
 
 	/// Internal helper function to solve a single velocity constraint. Templated to the motion type to reduce the amount of branches and calculations.
-	template <EMotionType Type1, EMotionType Type2>
+	template <EMotionType Type1, EMotionType Type2, bool SolveFriction, bool SolveNonPenetration>
 	static bool					sSolveVelocityConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2);
+
+	template <bool SolveFriction, bool SolveNonPenetration>
+	bool						TemplatedSolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+
+	template <EMotionType Type1, EMotionType Type2, bool ResetFriction, bool ResetNonPenetration>
+	static void					sResetVelocityConstraintLambdas(ContactConstraintBase &ioConstraint);
+
+	template <bool ResetFriction, bool ResetNonPenetration>
+	void						TemplatedResetVelocityConstraintLambdas(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 
 	/// Internal helper function to store lambdas applied during sSolveVelocityConstraint.
 	template <EMotionType Type1, EMotionType Type2>

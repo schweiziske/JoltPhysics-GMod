@@ -188,13 +188,6 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 	if (!mSolvePending.exchange(false, std::memory_order_acq_rel))
 		return false;
 
-	// Source constructs every constraint's VMQ data when the local controller runs. The adapter's
-	// earlier parallel setup job is only a Jolt lifecycle requirement; rebuild at the actual Source
-	// controller stage so predictive limits and cached Jacobians observe the preceding contact pass.
-	for (Constraint *constraint : mConstraints)
-		if (constraint->IsActive())
-			constraint->SetupVelocityConstraint(inDeltaTime);
-
 	bool appliedImpulse = false;
 	bool groupBroken = false;
 	auto solveConstraint = [&](Constraint *constraint, float tauFactor, float dampingFactor)
@@ -228,13 +221,29 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 			if ((*it)->IsActive())
 				solveConstraint(*it, tauFactor, dampingFactor);
 	};
+	auto setupAndSolveForward = [&](float tauFactor, float dampingFactor)
+	{
+		// Havana's setup_and_step_constraint is interleaved per constraint. Do not set up the
+		// complete group first: a later predictive Length constraint must observe velocity impulses
+		// written by an earlier Ragdoll/Fixed setup solve in the same local controller pass.
+		for (Constraint *constraint : mConstraints)
+		{
+			if (groupBroken)
+				break;
+			if (constraint->IsActive())
+			{
+				constraint->SetupVelocityConstraint(inDeltaTime);
+				solveConstraint(constraint, tauFactor, dampingFactor);
+			}
+		}
+	};
 
 	// GMod's shipped vphysics binary performs one setup solve followed by one reverse/forward scan
 	// per local-system iteration. This differs from the duplicated x < 2 phase present in the
 	// available Havana source snapshot. A staged Length fingerprint proves the binary behavior:
 	// additionalIterations -2/-1/0 produces 1/3/5 solves respectively, while the duplicated loop
 	// produces 1/5/9. Match the game binary that this adapter replaces.
-	solveForward(1.0f, 1.0f);
+	setupAndSolveForward(1.0f, 1.0f);
 	// Havana stores m_n_iterations as signed additionalIterations + 2. Negative input is not
 	// clamped: -1 performs one iteration, while <= -2 performs none after the setup solve.
 	const int64 num_iterations = int64(mAdditionalIterations) + 2;

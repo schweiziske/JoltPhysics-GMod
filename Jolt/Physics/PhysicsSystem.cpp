@@ -1423,29 +1423,28 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					{
 						// Solve velocity constraints
 						ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
-						mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
-						// IVP runs its local constraint controller after dynamic friction and before the
-						// later static-friction convergence. A legacy group owns an internal complete
-						// Havana pass and mSolvePending ensures it runs only once in this physics step.
-						ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
-						// With no contacts there is no later friction velocity to observe. Run predictive
-						// micro-angle groups at the ordinary controller stage so frozen reference updates
-						// retain Havana's normal response instead of being delayed to the final iteration.
-						if (contacts_begin == contacts_end)
+						const bool has_contacts = contacts_begin != contacts_end;
+						const bool any_contact_impacting = has_contacts
+							&& mContactManager.AreAnyContactsImpacting(contacts_begin, contacts_end);
+						if (!has_contacts || any_contact_impacting)
+						{
+							// IVP predicts whether the current gap reaches its impact distance during
+							// this PSI. Keep Havana ahead of that impact impulse; resting friction is
+							// handled after contact convergence below.
+							ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
 							ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
+						}
+						mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
 					}
 
 					// Mark the batch as processed
 					bool last_iteration, final_batch;
 					mLargeIslandSplitter.MarkBatchProcessed(split_island_index, constraints_begin, constraints_end, contacts_begin, contacts_end, last_iteration, final_batch);
-
-					// A pure predictive micro-angle group must see the final contact velocity. Rebuild and
-					// solve it only after the contact iterations have converged; mixed Weld/Rope groups
-					// stay in the ordinary Source controller stage above.
-					if (last_iteration && contacts_begin != contacts_end)
+					if (last_iteration && contacts_begin != contacts_end
+						&& !mContactManager.AreAnyContactsImpacting(contacts_begin, contacts_end))
 					{
+						ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
 						ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
-						ConstraintManager::sSolvePostContactLegacyVelocityMembers(active_constraints, constraints_begin, constraints_end, delta_time);
 					}
 
 					// Save back the lambdas in the contact cache for the warm start of the next physics update
@@ -1536,32 +1535,52 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 			#endif
 
 				// We didn't create a split, just run the solver now for this entire island. Begin by warm starting.
+				const bool has_legacy_constraints = ConstraintManager::sHasLegacyConstraints(
+					active_constraints, constraints_begin, constraints_end);
 				ConstraintManager::sWarmStartVelocityConstraints(active_constraints, constraints_begin, constraints_end, warm_start_impulse_ratio, steps_calculator);
-				mContactManager.WarmStartVelocityConstraints(contacts_begin, contacts_end, warm_start_impulse_ratio, steps_calculator);
+				if (has_legacy_constraints)
+					mContactManager.RegisterVelocityConstraints(contacts_begin, contacts_end, steps_calculator);
+				else
+					mContactManager.WarmStartVelocityConstraints(contacts_begin, contacts_end, warm_start_impulse_ratio, steps_calculator);
 				steps_calculator.Finalize();
 
 				// Store the number of position steps for later
 				mIslandBuilder.SetNumPositionSteps(island_idx, steps_calculator.GetNumPositionSteps());
 
 				// Solve velocity constraints
-				for (uint velocity_step = 0; velocity_step < steps_calculator.GetNumVelocitySteps(); ++velocity_step)
+				const uint num_velocity_steps = steps_calculator.GetNumVelocitySteps();
+				const bool has_contacts = contacts_begin != contacts_end;
+				const bool any_contact_impacting = has_contacts
+					&& mContactManager.AreAnyContactsImpacting(contacts_begin, contacts_end);
+				for (uint velocity_step = 0; velocity_step < num_velocity_steps; ++velocity_step)
 				{
 					bool applied_impulse = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
-					applied_impulse |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
-					applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
-					if (contacts_begin == contacts_end)
-						applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
+					if (has_legacy_constraints)
+					{
+						if (velocity_step == 0)
+						{
+							if (any_contact_impacting)
+							{
+								// IVP runs the PSI controller before its impact system.
+								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
+								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
+								applied_impulse |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
+							}
+							else
+							{
+								// Single-contact IVP controller order: dynamic tangential friction,
+								// Havana constraints, then the static normal distance keeper.
+								applied_impulse |= mContactManager.SolveFrictionConstraints(contacts_begin, contacts_end);
+								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
+								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
+								applied_impulse |= mContactManager.SolveNonPenetrationConstraints(contacts_begin, contacts_end);
+							}
+						}
+					}
+					else
+						applied_impulse |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
 					if (!applied_impulse)
 						break;
-				}
-
-				// Jolt combines contact pressure and friction in its iterative contact solver. Source's
-				// tiny wheel-angle controllers need one refreshed Havana pass after that convergence,
-				// otherwise later contact iterations can leave the limit violated for a whole frame.
-				if (contacts_begin != contacts_end)
-				{
-					ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
-					ConstraintManager::sSolvePostContactLegacyVelocityMembers(active_constraints, constraints_begin, constraints_end, delta_time);
 				}
 
 				// Save back the lambdas in the contact cache for the warm start of the next physics update

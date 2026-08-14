@@ -65,6 +65,8 @@ public:
 	/// This function is called multiple times to iteratively come to a solution that meets all velocity constraints
 	static bool				sSolveVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime);
 
+	static bool				sHasLegacyConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
+
 	/// Execute pure predictive micro-angle legacy groups after Jolt's outer contact iterations.
 	/// Mixed Source systems retain their ordinary controller pass.
 	static bool				sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, bool inPostContactOnly);

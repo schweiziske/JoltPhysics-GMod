@@ -163,6 +163,14 @@ bool ConstraintManager::sSolveVelocityConstraints(Constraint **inActiveConstrain
 	return any_impulse_applied;
 }
 
+bool ConstraintManager::sHasLegacyConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd)
+{
+	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
+		if (inActiveConstraints[*constraint_idx]->GetLegacyConstraintGroup() != nullptr)
+			return true;
+	return false;
+}
+
 bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, bool inPostContactOnly)
 {
 	JPH_PROFILE_FUNCTION();
