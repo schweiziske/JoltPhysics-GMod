@@ -37,7 +37,7 @@ bool ContactConstraintManager::sDrawContactManifolds = false;
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <EMotionType Type1, EMotionType Type2>
-JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::CalculateFrictionAndNonPenetrationConstraintProperties(float inDeltaTime, Vec3Arg inGravity, const Body &inBody1, const Body &inBody2, float inInvM1, float inInvM2, Mat44Arg inInvI1, Mat44Arg inInvI2, RVec3Arg inWorldSpacePosition1, RVec3Arg inWorldSpacePosition2, Vec3Arg inWorldSpaceNormal, Vec3Arg inWorldSpaceTangent1, Vec3Arg inWorldSpaceTangent2, const ContactSettings &inSettings, float inMinVelocityForRestitution, float inContactSeparationTarget)
+JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::CalculateFrictionAndNonPenetrationConstraintProperties(float inDeltaTime, Vec3Arg inGravity, const Body &inBody1, const Body &inBody2, float inInvM1, float inInvM2, Mat44Arg inInvI1, Mat44Arg inInvI2, RVec3Arg inWorldSpacePosition1, RVec3Arg inWorldSpacePosition2, Vec3Arg inWorldSpaceNormal, Vec3Arg inWorldSpaceTangent1, Vec3Arg inWorldSpaceTangent2, const ContactSettings &inSettings, float inMinVelocityForRestitution, float inContactSeparationTarget, float inContactVelocityBiasFactorOutsideTarget, float inContactVelocityBiasFactorInsideTarget, float inContactRescueVelocityFactor, bool inAllowContactRescue)
 {
 	JPH_DET_LOG("CalculateFrictionAndNonPenetrationConstraintProperties: p1: " << inWorldSpacePosition1 << " p2: " << inWorldSpacePosition2
 		<< " normal: " << inWorldSpaceNormal << " tangent1: " << inWorldSpaceTangent1 << " tangent2: " << inWorldSpaceTangent2
@@ -67,15 +67,25 @@ JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::Calcu
 	}
 	float normal_velocity = relative_velocity.Dot(inWorldSpaceNormal);
 
-	// How far the contact is inside its desired separation boundary (> 0 if too close, < 0 if
-	// farther apart). A zero target preserves Jolt's native geometric-contact behavior.
-	float penetration = Vec3(inWorldSpacePosition1 - inWorldSpacePosition2).Dot(inWorldSpaceNormal) + inContactSeparationTarget;
+	// Signed distance from the velocity target (> 0 if outside / farther apart, < 0 if inside).
+	float separation = Vec3(inWorldSpacePosition2 - inWorldSpacePosition1).Dot(inWorldSpaceNormal) - inContactSeparationTarget;
 
-	// If there is no penetration, this is a speculative contact and we will apply a bias to the contact constraint
-	// so that the constraint becomes relative_velocity . contact normal > -penetration / delta_time
-	// instead of relative_velocity . contact normal > 0
+	// Outside the target, native Jolt closes the entire gap in one step. Legacy friction contacts use
+	// a fixed per-second convergence rate instead. They may also request a much gentler outward rate
+	// when already inside the target rather than leaving all correction to the position solver.
 	// See: GDC 2013: "Physics for Game Programmers; Continuous Collision" - Erin Catto
-	float speculative_contact_velocity_bias = max(0.0f, -penetration / inDeltaTime);
+	float speculative_contact_velocity_bias;
+	if (separation > 0.0f)
+	{
+		float outside_factor = inContactVelocityBiasFactorOutsideTarget > 0.0f
+			? inContactVelocityBiasFactorOutsideTarget
+			: 1.0f / inDeltaTime;
+		speculative_contact_velocity_bias = separation * outside_factor;
+	}
+	else
+	{
+		speculative_contact_velocity_bias = separation * inContactVelocityBiasFactorInsideTarget;
+	}
 
 	// Determine if the velocity is big enough for restitution
 	float normal_velocity_bias;
@@ -131,6 +141,22 @@ JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::Calcu
 	{
 		// No restitution. We can safely apply our contact velocity bias.
 		normal_velocity_bias = speculative_contact_velocity_bias;
+	}
+
+	// IVP resolves a newly impacting contact in the velocity domain instead of relying solely on
+	// split-position correction. A zero cached normal lambda means this point has not supported an
+	// active contact yet; this also lets a speculative manifold wait until it crosses the inner
+	// collision tolerance before consuming its one impact rescue.
+	if (inAllowContactRescue && normal_velocity < 0.0f && inContactRescueVelocityFactor > 0.0f && inContactSeparationTarget > 0.0f && inDeltaTime > 0.0f)
+	{
+		float gap = Vec3(inWorldSpacePosition2 - inWorldSpacePosition1).Dot(inWorldSpaceNormal);
+		float collision_tolerance = 0.5f * inContactSeparationTarget;
+		if (gap <= collision_tolerance)
+		{
+			float rescue_addon = 2.0f * max(0.0f, collision_tolerance - gap) / inDeltaTime;
+			float rescue_velocity = inContactRescueVelocityFactor * (inContactSeparationTarget + rescue_addon);
+			normal_velocity_bias = min(normal_velocity_bias, -rescue_velocity);
+		}
 	}
 
 	mNonPenetrationConstraint.CalculateConstraintProperties(inInvM1, inInvI1, r1, inInvM2, inInvI2, r2, inWorldSpaceNormal, normal_velocity_bias);
@@ -931,7 +957,8 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 				wcp.mFrictionConstraint2.SetTotalLambda(ccp.mFrictionLambda[1]);
 				wcp.mContactPoint = &ccp;
 
-				wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, world_space_normal, t1, t2, settings, min_velocity_for_restitution, mPhysicsSettings.mContactSeparationTarget);
+				bool allow_contact_rescue = wcp.mNonPenetrationConstraint.GetTotalLambda() <= 0.0f;
+				wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, world_space_normal, t1, t2, settings, min_velocity_for_restitution, mPhysicsSettings.mContactSeparationTarget, mPhysicsSettings.mContactVelocityBiasFactorOutsideTarget, mPhysicsSettings.mContactVelocityBiasFactorInsideTarget, mPhysicsSettings.mContactRescueVelocityFactor, allow_contact_rescue);
 			}
 
 		#ifdef JPH_DEBUG_RENDERER
@@ -1239,7 +1266,8 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 			wcp.mContactPoint = &cp;
 
 			// Setup velocity constraint
-			wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, inManifold.mWorldSpaceNormal, t1, t2, settings, mPhysicsSettings.mMinVelocityForRestitution, mPhysicsSettings.mContactSeparationTarget);
+			bool allow_contact_rescue = wcp.mNonPenetrationConstraint.GetTotalLambda() <= 0.0f;
+			wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, inManifold.mWorldSpaceNormal, t1, t2, settings, mPhysicsSettings.mMinVelocityForRestitution, mPhysicsSettings.mContactSeparationTarget, mPhysicsSettings.mContactVelocityBiasFactorOutsideTarget, mPhysicsSettings.mContactVelocityBiasFactorInsideTarget, mPhysicsSettings.mContactRescueVelocityFactor, allow_contact_rescue);
 		}
 
 	#ifdef JPH_DEBUG_RENDERER

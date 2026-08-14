@@ -54,6 +54,19 @@ struct PhysicsSettings
 	/// CCD path. Must be non-negative and no larger than mSpeculativeContactDistance (unit: meters)
 	float		mContactSeparationTarget = 0.0f;
 
+	/// Optional rate for closing a speculative contact that is outside mContactSeparationTarget
+	/// (unit: 1 / second). A value <= 0 preserves Jolt's native one-step correction (1 / delta time).
+	float		mContactVelocityBiasFactorOutsideTarget = 0.0f;
+
+	/// Optional rate for separating a contact that is inside mContactSeparationTarget
+	/// (unit: 1 / second). Zero preserves Jolt's native behavior of leaving this to the position solver.
+	float		mContactVelocityBiasFactorInsideTarget = 0.0f;
+
+	/// Optional impact rescue velocity factor for legacy contact behavior. When non-zero, a contact
+	/// with no cached normal impulse that enters the inner half of mContactSeparationTarget receives
+	/// a velocity-domain separation target. Zero preserves Jolt's native split-position correction.
+	float		mContactRescueVelocityFactor = 0.0f;
+
 	/// How much bodies are allowed to sink into each other (unit: meters)
 	float		mPenetrationSlop = 0.02f;
 
