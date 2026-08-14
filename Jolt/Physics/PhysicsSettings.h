@@ -67,6 +67,11 @@ struct PhysicsSettings
 	/// a velocity-domain separation target. Zero preserves Jolt's native split-position correction.
 	float		mContactRescueVelocityFactor = 0.0f;
 
+	/// If true, restitution is only applied when the contact manifold did not exist in the previous
+	/// update. Persistent legacy friction contacts then use their gap-closing velocity target instead
+	/// of repeatedly bouncing when another constraint drives them back toward the surface.
+	bool		mContactRestitutionOnlyOnNewContact = false;
+
 	/// How much bodies are allowed to sink into each other (unit: meters)
 	float		mPenetrationSlop = 0.02f;
 

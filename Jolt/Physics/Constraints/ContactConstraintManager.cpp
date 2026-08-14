@@ -37,7 +37,7 @@ bool ContactConstraintManager::sDrawContactManifolds = false;
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <EMotionType Type1, EMotionType Type2>
-JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::CalculateFrictionAndNonPenetrationConstraintProperties(float inDeltaTime, Vec3Arg inGravity, const Body &inBody1, const Body &inBody2, float inInvM1, float inInvM2, Mat44Arg inInvI1, Mat44Arg inInvI2, RVec3Arg inWorldSpacePosition1, RVec3Arg inWorldSpacePosition2, Vec3Arg inWorldSpaceNormal, Vec3Arg inWorldSpaceTangent1, Vec3Arg inWorldSpaceTangent2, const ContactSettings &inSettings, float inMinVelocityForRestitution, float inContactSeparationTarget, float inContactVelocityBiasFactorOutsideTarget, float inContactVelocityBiasFactorInsideTarget, float inContactRescueVelocityFactor, bool inAllowContactRescue)
+JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::CalculateFrictionAndNonPenetrationConstraintProperties(float inDeltaTime, Vec3Arg inGravity, const Body &inBody1, const Body &inBody2, float inInvM1, float inInvM2, Mat44Arg inInvI1, Mat44Arg inInvI2, RVec3Arg inWorldSpacePosition1, RVec3Arg inWorldSpacePosition2, Vec3Arg inWorldSpaceNormal, Vec3Arg inWorldSpaceTangent1, Vec3Arg inWorldSpaceTangent2, const ContactSettings &inSettings, float inMinVelocityForRestitution, float inContactSeparationTarget, float inContactVelocityBiasFactorOutsideTarget, float inContactVelocityBiasFactorInsideTarget, float inContactRescueVelocityFactor, bool inAllowContactRescue, bool inAllowRestitution)
 {
 	JPH_DET_LOG("CalculateFrictionAndNonPenetrationConstraintProperties: p1: " << inWorldSpacePosition1 << " p2: " << inWorldSpacePosition2
 		<< " normal: " << inWorldSpaceNormal << " tangent1: " << inWorldSpaceTangent1 << " tangent2: " << inWorldSpaceTangent2
@@ -89,7 +89,7 @@ JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::Calcu
 
 	// Determine if the velocity is big enough for restitution
 	float normal_velocity_bias;
-	if (inSettings.mCombinedRestitution > 0.0f && normal_velocity < -inMinVelocityForRestitution)
+	if (inAllowRestitution && inSettings.mCombinedRestitution > 0.0f && normal_velocity < -inMinVelocityForRestitution)
 	{
 		// We have a velocity that is big enough for restitution. This is where speculative contacts don't work
 		// great as we have to decide now if we're going to apply the restitution or not. If the relative
@@ -957,8 +957,11 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 				wcp.mFrictionConstraint2.SetTotalLambda(ccp.mFrictionLambda[1]);
 				wcp.mContactPoint = &ccp;
 
-				bool allow_contact_rescue = wcp.mNonPenetrationConstraint.GetTotalLambda() <= 0.0f;
-				wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, world_space_normal, t1, t2, settings, min_velocity_for_restitution, mPhysicsSettings.mContactSeparationTarget, mPhysicsSettings.mContactVelocityBiasFactorOutsideTarget, mPhysicsSettings.mContactVelocityBiasFactorInsideTarget, mPhysicsSettings.mContactRescueVelocityFactor, allow_contact_rescue);
+				bool has_cached_support = wcp.mNonPenetrationConstraint.GetTotalLambda() > 0.0f;
+				bool allow_contact_rescue = !has_cached_support;
+				// This path is only reached when the body-pair cache reused last update's manifold.
+				bool allow_restitution = !mPhysicsSettings.mContactRestitutionOnlyOnNewContact;
+				wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, world_space_normal, t1, t2, settings, min_velocity_for_restitution, mPhysicsSettings.mContactSeparationTarget, mPhysicsSettings.mContactVelocityBiasFactorOutsideTarget, mPhysicsSettings.mContactVelocityBiasFactorInsideTarget, mPhysicsSettings.mContactRescueVelocityFactor, allow_contact_rescue, allow_restitution);
 			}
 
 		#ifdef JPH_DEBUG_RENDERER
@@ -1143,6 +1146,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 	// Get the contact points for the old cache entry
 	const ManifoldCache &read_cache = mCache[mCacheWriteIdx ^ 1];
 	const MKeyValue *old_manifold_kv = read_cache.Find(key, key_hash);
+	const bool contact_persisted = old_manifold_kv != nullptr;
 	const CachedContactPoint *ccp_start;
 	const CachedContactPoint *ccp_end;
 	if (old_manifold_kv != nullptr)
@@ -1266,8 +1270,10 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 			wcp.mContactPoint = &cp;
 
 			// Setup velocity constraint
-			bool allow_contact_rescue = wcp.mNonPenetrationConstraint.GetTotalLambda() <= 0.0f;
-			wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, inManifold.mWorldSpaceNormal, t1, t2, settings, mPhysicsSettings.mMinVelocityForRestitution, mPhysicsSettings.mContactSeparationTarget, mPhysicsSettings.mContactVelocityBiasFactorOutsideTarget, mPhysicsSettings.mContactVelocityBiasFactorInsideTarget, mPhysicsSettings.mContactRescueVelocityFactor, allow_contact_rescue);
+			bool has_cached_support = wcp.mNonPenetrationConstraint.GetTotalLambda() > 0.0f;
+			bool allow_contact_rescue = !has_cached_support;
+			bool allow_restitution = !mPhysicsSettings.mContactRestitutionOnlyOnNewContact || !contact_persisted;
+			wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, inManifold.mWorldSpaceNormal, t1, t2, settings, mPhysicsSettings.mMinVelocityForRestitution, mPhysicsSettings.mContactSeparationTarget, mPhysicsSettings.mContactVelocityBiasFactorOutsideTarget, mPhysicsSettings.mContactVelocityBiasFactorInsideTarget, mPhysicsSettings.mContactRescueVelocityFactor, allow_contact_rescue, allow_restitution);
 		}
 
 	#ifdef JPH_DEBUG_RENDERER
