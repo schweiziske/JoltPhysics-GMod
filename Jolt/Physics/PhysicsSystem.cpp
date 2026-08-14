@@ -23,6 +23,7 @@
 #include <Jolt/Physics/Collision/InternalEdgeRemovingCollector.h>
 #include <Jolt/Physics/Constraints/CalculateSolverSteps.h>
 #include <Jolt/Physics/Constraints/ConstraintPart/AxisConstraintPart.h>
+#include <Jolt/Physics/Constraints/TwoBodyConstraint.h>
 #include <Jolt/Physics/DeterminismLog.h>
 #include <Jolt/Physics/SoftBody/SoftBodyMotionProperties.h>
 #include <Jolt/Physics/SoftBody/SoftBodyShape.h>
@@ -33,6 +34,8 @@
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Core/QuickSort.h>
 #include <Jolt/Core/ScopeExit.h>
+#include <cstdio>
+#include <cstdlib>
 #ifdef JPH_DEBUG_RENDERER
 	#include <Jolt/Renderer/DebugRenderer.h>
 #endif // JPH_DEBUG_RENDERER
@@ -1537,6 +1540,9 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				// We didn't create a split, just run the solver now for this entire island. Begin by warm starting.
 				const bool has_legacy_constraints = ConstraintManager::sHasLegacyConstraints(
 					active_constraints, constraints_begin, constraints_end);
+				const bool has_contacts = contacts_begin != contacts_end;
+				const bool any_contact_impacting = has_contacts
+					&& mContactManager.AreAnyContactsImpacting(contacts_begin, contacts_end);
 				ConstraintManager::sWarmStartVelocityConstraints(active_constraints, constraints_begin, constraints_end, warm_start_impulse_ratio, steps_calculator);
 				if (has_legacy_constraints)
 					mContactManager.RegisterVelocityConstraints(contacts_begin, contacts_end, steps_calculator);
@@ -1549,9 +1555,33 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 
 				// Solve velocity constraints
 				const uint num_velocity_steps = steps_calculator.GetNumVelocitySteps();
-				const bool has_contacts = contacts_begin != contacts_end;
-				const bool any_contact_impacting = has_contacts
-					&& mContactManager.AreAnyContactsImpacting(contacts_begin, contacts_end);
+				const bool trace_legacy_stages = has_legacy_constraints
+					&& std::getenv("VJOLT_TRACE_LEGACY_STAGES") != nullptr;
+				auto trace_legacy_bodies = [&](const char *inStage)
+				{
+					if (!trace_legacy_stages)
+						return;
+					for (const uint32 *constraint_idx = constraints_begin; constraint_idx < constraints_end; ++constraint_idx)
+					{
+						Constraint *constraint = active_constraints[*constraint_idx];
+						if (constraint->GetLegacyConstraintGroup() == nullptr
+							|| constraint->GetType() != EConstraintType::TwoBodyConstraint)
+							continue;
+						const TwoBodyConstraint *two_body = static_cast<const TwoBodyConstraint *>(constraint);
+						const Body *body1 = two_body->GetBody1();
+						const Body *body2 = two_body->GetBody2();
+						const Vec3 v1 = body1->GetLinearVelocity();
+						const Vec3 w1 = body1->GetAngularVelocity();
+						const Vec3 v2 = body2->GetLinearVelocity();
+						const Vec3 w2 = body2->GetAngularVelocity();
+						std::fprintf(stderr,
+							"LEGACY_STAGE %s b1=%u v=(%.9g,%.9g,%.9g) w=(%.9g,%.9g,%.9g) b2=%u v=(%.9g,%.9g,%.9g) w=(%.9g,%.9g,%.9g)\n",
+							inStage, body1->GetID().GetIndexAndSequenceNumber(), v1.GetX(), v1.GetY(), v1.GetZ(),
+							w1.GetX(), w1.GetY(), w1.GetZ(), body2->GetID().GetIndexAndSequenceNumber(),
+							v2.GetX(), v2.GetY(), v2.GetZ(), w2.GetX(), w2.GetY(), w2.GetZ());
+						break;
+					}
+				};
 				for (uint velocity_step = 0; velocity_step < num_velocity_steps; ++velocity_step)
 				{
 					bool applied_impulse = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
@@ -1559,21 +1589,30 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					{
 						if (velocity_step == 0)
 						{
+							trace_legacy_bodies("pre");
 							if (any_contact_impacting)
 							{
 								// IVP runs the PSI controller before its impact system.
+								mContactManager.ResetLegacyFrictionState(contacts_begin, contacts_end);
+								mContactManager.ResetNonPenetrationLambdas(contacts_begin, contacts_end);
 								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
 								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
+								trace_legacy_bodies("after_havana_impact");
 								applied_impulse |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
+								trace_legacy_bodies("after_contact_impact");
 							}
 							else
 							{
 								// Single-contact IVP controller order: dynamic tangential friction,
 								// Havana constraints, then the static normal distance keeper.
-								applied_impulse |= mContactManager.SolveFrictionConstraints(contacts_begin, contacts_end);
+								applied_impulse |= mContactManager.SolveLegacyFrictionConstraints(contacts_begin, contacts_end, delta_time);
+								trace_legacy_bodies("after_friction");
 								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
 								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
+								trace_legacy_bodies("after_havana");
+								mContactManager.ResetNonPenetrationLambdas(contacts_begin, contacts_end);
 								applied_impulse |= mContactManager.SolveNonPenetrationConstraints(contacts_begin, contacts_end);
+								trace_legacy_bodies("after_normal");
 							}
 						}
 					}

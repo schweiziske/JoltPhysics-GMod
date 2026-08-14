@@ -173,7 +173,7 @@ public:
 	}
 
 	/// Part 1 of AxisConstraint::SolveVelocityConstraint: get the total lambda
-	JPH_INLINE float			SolveVelocityConstraintGetTotalLambda(Vec3Arg inLinearVelocity1, Vec3Arg inAngularVelocity1, Vec3Arg inLinearVelocity2, Vec3Arg inAngularVelocity2, Vec3Arg inWorldSpaceAxis) const
+	JPH_INLINE float			GetVelocityConstraintValue(Vec3Arg inLinearVelocity1, Vec3Arg inAngularVelocity1, Vec3Arg inLinearVelocity2, Vec3Arg inAngularVelocity2, Vec3Arg inWorldSpaceAxis) const
 	{
 		// Calculate jacobian multiplied by linear velocity
 		float jv;
@@ -191,11 +191,28 @@ public:
 			jv += Vec3::sLoadFloat3Unsafe(this->mR1PlusUxAxis).Dot(inAngularVelocity1);
 		if constexpr (Type2 != EMotionType::Static)
 			jv -= Vec3::sLoadFloat3Unsafe(this->mR2xAxis).Dot(inAngularVelocity2);
+		return jv;
+	}
+
+	JPH_INLINE float			GetInverseEffectiveMass() const
+	{
+		return this->mEffectiveMass > 0.0f? 1.0f / this->mEffectiveMass : 0.0f;
+	}
+
+	JPH_INLINE float			GetVelocityBias() const
+	{
+		return this->mBias;
+	}
+
+	/// Part 1 of AxisConstraint::SolveVelocityConstraint: get the total lambda
+	JPH_INLINE float			SolveVelocityConstraintGetTotalLambda(Vec3Arg inLinearVelocity1, Vec3Arg inAngularVelocity1, Vec3Arg inLinearVelocity2, Vec3Arg inAngularVelocity2, Vec3Arg inWorldSpaceAxis, float inAdditionalBias = 0.0f) const
+	{
+		const float jv = GetVelocityConstraintValue(inLinearVelocity1, inAngularVelocity1, inLinearVelocity2, inAngularVelocity2, inWorldSpaceAxis);
 
 		// Lagrange multiplier is:
 		//
 		// lambda = -K^-1 (J v + b)
-		float lambda = this->mEffectiveMass * (jv - this->mBias);
+		float lambda = this->mEffectiveMass * (jv - this->mBias - inAdditionalBias);
 
 		// Return the total accumulated lambda
 		return this->mTotalLambda + lambda;

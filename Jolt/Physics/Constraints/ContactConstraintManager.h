@@ -178,6 +178,11 @@ public:
 	template <class MotionPropertiesCallback>
 	void						WarmStartVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inWarmStartImpulseRatio, MotionPropertiesCallback &ioCallback);
 
+	/// Replay only cached tangential impulses. Legacy IVP islands recompute their normal distance
+	/// keeper after Havana, but retain the previous frame's dynamic-friction state.
+	template <class MotionPropertiesCallback>
+	void						WarmStartFrictionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inWarmStartImpulseRatio, MotionPropertiesCallback &ioCallback);
+
 	/// Register affected bodies with the solver-step calculator without replaying cached impulses.
 	template <class MotionPropertiesCallback>
 	void						RegisterVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, MotionPropertiesCallback &ioCallback);
@@ -214,9 +219,11 @@ public:
 	/// Restitution is only applied when v_n^- is large enough and the points are moving towards collision
 	bool						SolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 	bool						SolveFrictionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	bool						SolveLegacyFrictionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inDeltaTime);
 	bool						SolveNonPenetrationConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 	void						ResetFrictionLambdas(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 	void						ResetNonPenetrationLambdas(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	void						ResetLegacyFrictionState(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 
 
 	/// True when any contact in this range is predicted to enter IVP's impact distance this update.
@@ -288,9 +295,10 @@ private:
 		/// Total applied impulse during the last update that it was used
 		float					mNonPenetrationLambda;
 		Vector<2>				mFrictionLambda;
+		Vector<2>				mVPhysicsFrictionDisplacement;
 	};
 
-	static_assert(sizeof(CachedContactPoint) == 36, "Unexpected size");
+	static_assert(sizeof(CachedContactPoint) == 44, "Unexpected size");
 	static_assert(alignof(CachedContactPoint) == 4, "Assuming 4 byte aligned");
 
 	/// A single cached manifold
@@ -331,7 +339,7 @@ private:
 		CachedContactPoint		mContactPoints[1];
 	};
 
-	static_assert(sizeof(CachedManifold) == 56, "This structure is expect to not contain any waste due to alignment");
+	static_assert(sizeof(CachedManifold) == 64, "This structure is expect to not contain any waste due to alignment");
 	static_assert(alignof(CachedManifold) == 4, "Assuming 4 byte aligned");
 
 	/// Define a map that maps SubShapeIDPair -> manifold
@@ -529,8 +537,11 @@ private:
 	static JPH_INLINE void		sSetVelocities(MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, Vec3Arg inLinearVelocity1, Vec3Arg inAngularVelocity1, Vec3Arg inLinearVelocity2, Vec3Arg inAngularVelocity2);
 
 	/// Internal helper function to warm start contact constraint. Templated to the motion type to reduce the amount of branches and calculations.
-	template <EMotionType Type1, EMotionType Type2>
+	template <EMotionType Type1, EMotionType Type2, bool WarmStartFriction, bool WarmStartNonPenetration>
 	static void					sWarmStartConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inWarmStartImpulseRatio);
+
+	template <bool WarmStartFriction, bool WarmStartNonPenetration, class MotionPropertiesCallback>
+	void						TemplatedWarmStartVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inWarmStartImpulseRatio, MotionPropertiesCallback &ioCallback);
 
 	/// Internal helper function to solve a single velocity constraint. Templated to the motion type to reduce the amount of branches and calculations.
 	template <EMotionType Type1, EMotionType Type2, bool SolveFriction, bool SolveNonPenetration>
@@ -539,8 +550,14 @@ private:
 	template <bool SolveFriction, bool SolveNonPenetration>
 	bool						TemplatedSolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 
+	template <EMotionType Type1, EMotionType Type2>
+	static bool					sSolveLegacyFrictionConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime);
+
 	template <EMotionType Type1, EMotionType Type2, bool ResetFriction, bool ResetNonPenetration>
 	static void					sResetVelocityConstraintLambdas(ContactConstraintBase &ioConstraint);
+
+	template <EMotionType Type1, EMotionType Type2>
+	static void					sResetLegacyFrictionState(ContactConstraintBase &ioConstraint);
 
 	template <bool ResetFriction, bool ResetNonPenetration>
 	void						TemplatedResetVelocityConstraintLambdas(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
