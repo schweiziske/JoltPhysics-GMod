@@ -189,7 +189,7 @@ bool ConstraintManager::sSolvePostContactLegacyVelocityMembers(Constraint **inAc
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
 		LegacyConstraintGroup *group = c->GetLegacyConstraintGroup();
-		if (group == nullptr || !c->RequiresPostContactLegacySolve())
+		if (group == nullptr || group->RequiresPostContactSolve() || !c->RequiresPostContactLegacySolve())
 			continue;
 
 		// The LCS already completed its normal Havana pass. Correct only this predictive member

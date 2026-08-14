@@ -197,10 +197,11 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 
 	bool appliedImpulse = false;
 	bool groupBroken = false;
-	auto solveConstraint = [&](Constraint *constraint)
+	auto solveConstraint = [&](Constraint *constraint, float tauFactor, float dampingFactor)
 	{
 		if (groupBroken)
 			return;
+		constraint->SetLegacySolveFactors(tauFactor, dampingFactor);
 		const TwoBodyConstraint *two_body = constraint->GetType() == EConstraintType::TwoBodyConstraint?
 			static_cast<const TwoBodyConstraint *>(constraint) : nullptr;
 		const Vec3 linear1 = two_body? two_body->GetBody1()->GetLinearVelocity() : Vec3::sZero();
@@ -215,34 +216,37 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 			groupBroken = true;
 		}
 	};
-	auto solveForward = [&]()
+	auto solveForward = [&](float tauFactor, float dampingFactor)
 	{
 		for (Constraint *constraint : mConstraints)
 			if (constraint->IsActive())
-				solveConstraint(constraint);
+				solveConstraint(constraint, tauFactor, dampingFactor);
 	};
-	auto solveReverse = [&]()
+	auto solveReverse = [&](float tauFactor, float dampingFactor)
 	{
 		for (auto it = mConstraints.rbegin(); it != mConstraints.rend(); ++it)
 			if ((*it)->IsActive())
-				solveConstraint(*it);
+				solveConstraint(*it, tauFactor, dampingFactor);
 	};
 
-	// GMod's shipped Havana performs one setup solve followed by m_n_iterations. Each iteration
-	// runs two identical tau/damping phases, and every phase scans reverse then forward. Therefore
-	// a default private LCS performs 1 + 2 * 2 * 2 = 9 solves, not 5; a group with four additional
-	// iterations performs 25 solves. The duplicated phase is observable and must not be collapsed.
-	solveForward();
+	// GMod's shipped vphysics binary performs one setup solve followed by one reverse/forward scan
+	// per local-system iteration. This differs from the duplicated x < 2 phase present in the
+	// available Havana source snapshot. A staged Length fingerprint proves the binary behavior:
+	// additionalIterations -2/-1/0 produces 1/3/5 solves respectively, while the duplicated loop
+	// produces 1/5/9. Match the game binary that this adapter replaces.
+	solveForward(1.0f, 1.0f);
 	// Havana stores m_n_iterations as signed additionalIterations + 2. Negative input is not
 	// clamped: -1 performs one iteration, while <= -2 performs none after the setup solve.
 	const int64 num_iterations = int64(mAdditionalIterations) + 2;
-	for (int64 iteration = 0; iteration < num_iterations && !groupBroken; ++iteration)
+	static constexpr float tau_factors[] = { 1.0f, 1.0f, 0.8f, 0.6f, 0.4f, 0.4f, 0.4f, 0.4f, 0.4f, 0.0f };
+	static constexpr float damping_factors[] = { 1.0f, 1.0f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.8f, 0.0f };
+	for (int64 iteration = 0;
+		iteration < num_iterations && iteration < int64(std::size(tau_factors))
+			&& tau_factors[iteration] != 0.0f && !groupBroken;
+		++iteration)
 	{
-		for (int phase = 0; phase < 2 && !groupBroken; ++phase)
-		{
-			solveReverse();
-			solveForward();
-		}
+		solveReverse(tau_factors[iteration], damping_factors[iteration]);
+		solveForward(tau_factors[iteration], damping_factors[iteration]);
 	}
 
 	(void)inCaller;

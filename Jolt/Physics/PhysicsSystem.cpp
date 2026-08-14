@@ -1428,6 +1428,11 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 						// later static-friction convergence. A legacy group owns an internal complete
 						// Havana pass and mSolvePending ensures it runs only once in this physics step.
 						ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
+						// With no contacts there is no later friction velocity to observe. Run predictive
+						// micro-angle groups at the ordinary controller stage so frozen reference updates
+						// retain Havana's normal response instead of being delayed to the final iteration.
+						if (contacts_begin == contacts_end)
+							ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
 					}
 
 					// Mark the batch as processed
@@ -1437,11 +1442,10 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					// A pure predictive micro-angle group must see the final contact velocity. Rebuild and
 					// solve it only after the contact iterations have converged; mixed Weld/Rope groups
 					// stay in the ordinary Source controller stage above.
-					if (last_iteration)
+					if (last_iteration && contacts_begin != contacts_end)
 					{
 						ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
-						if (contacts_begin != contacts_end)
-							ConstraintManager::sSolvePostContactLegacyVelocityMembers(active_constraints, constraints_begin, constraints_end, delta_time);
+						ConstraintManager::sSolvePostContactLegacyVelocityMembers(active_constraints, constraints_begin, constraints_end, delta_time);
 					}
 
 					// Save back the lambdas in the contact cache for the warm start of the next physics update
@@ -1545,6 +1549,8 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					bool applied_impulse = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
 					applied_impulse |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
 					applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
+					if (contacts_begin == contacts_end)
+						applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
 					if (!applied_impulse)
 						break;
 				}
@@ -1552,9 +1558,11 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				// Jolt combines contact pressure and friction in its iterative contact solver. Source's
 				// tiny wheel-angle controllers need one refreshed Havana pass after that convergence,
 				// otherwise later contact iterations can leave the limit violated for a whole frame.
-				ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
 				if (contacts_begin != contacts_end)
+				{
+					ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
 					ConstraintManager::sSolvePostContactLegacyVelocityMembers(active_constraints, constraints_begin, constraints_end, delta_time);
+				}
 
 				// Save back the lambdas in the contact cache for the warm start of the next physics update
 				mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);

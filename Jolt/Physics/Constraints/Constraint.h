@@ -216,6 +216,9 @@ public:
 	/// True only when predictive activation must be rebuilt after contact impulses. A legacy group
 	/// takes the post-contact path only when every active member opts in.
 	virtual bool				RequiresPostContactLegacySolve() const { return false; }
+	/// Per-scan coefficients used by Source/Havana local constraint systems. Native Jolt
+	/// constraints ignore these; compatibility constraints consume them during SolveVelocityConstraint.
+	virtual void				SetLegacySolveFactors(float inTauFactor, float inDampingFactor) { }
 	///@}
 
 	/// Link bodies that are connected by this constraint in the island builder
