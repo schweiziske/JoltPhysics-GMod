@@ -295,10 +295,14 @@ private:
 		/// Total applied impulse during the last update that it was used
 		float					mNonPenetrationLambda;
 		Vector<2>				mFrictionLambda;
-		Vector<2>				mVPhysicsFrictionDisplacement;
+
+		/// IVP keeps the tangential spring and its supporting normal pressure alive when a
+		/// rolling contact replaces its geometric contact point inside the same manifold.
+		Float3					mVPhysicsFrictionDisplacement;
+		float					mVPhysicsFrictionNormalLambda;
 	};
 
-	static_assert(sizeof(CachedContactPoint) == 44, "Unexpected size");
+	static_assert(sizeof(CachedContactPoint) == 52, "Unexpected size");
 	static_assert(alignof(CachedContactPoint) == 4, "Assuming 4 byte aligned");
 
 	/// A single cached manifold
@@ -339,7 +343,7 @@ private:
 		CachedContactPoint		mContactPoints[1];
 	};
 
-	static_assert(sizeof(CachedManifold) == 64, "This structure is expect to not contain any waste due to alignment");
+	static_assert(sizeof(CachedManifold) == 72, "This structure is expect to not contain any waste due to alignment");
 	static_assert(alignof(CachedManifold) == 4, "Assuming 4 byte aligned");
 
 	/// Define a map that maps SubShapeIDPair -> manifold

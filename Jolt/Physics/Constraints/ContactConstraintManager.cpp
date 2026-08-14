@@ -240,6 +240,7 @@ void ContactConstraintManager::CachedContactPoint::SaveState(StateRecorder &inSt
 	inStream.Write(mNonPenetrationLambda);
 	inStream.Write(mFrictionLambda);
 	inStream.Write(mVPhysicsFrictionDisplacement);
+	inStream.Write(mVPhysicsFrictionNormalLambda);
 }
 
 void ContactConstraintManager::CachedContactPoint::RestoreState(StateRecorder &inStream)
@@ -249,6 +250,7 @@ void ContactConstraintManager::CachedContactPoint::RestoreState(StateRecorder &i
 	inStream.Read(mNonPenetrationLambda);
 	inStream.Read(mFrictionLambda);
 	inStream.Read(mVPhysicsFrictionDisplacement);
+	inStream.Read(mVPhysicsFrictionNormalLambda);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1150,6 +1152,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 	const ManifoldCache &read_cache = mCache[mCacheWriteIdx ^ 1];
 	const MKeyValue *old_manifold_kv = read_cache.Find(key, key_hash);
 	const bool contact_persisted = old_manifold_kv != nullptr;
+	const CachedManifold *old_manifold = nullptr;
 	const CachedContactPoint *ccp_start;
 	const CachedContactPoint *ccp_end;
 	if (old_manifold_kv != nullptr)
@@ -1159,7 +1162,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 			mContactListener->OnContactPersisted(inBody1, inBody2, inManifold, settings);
 
 		// Fetch the contact points from the old manifold
-		const CachedManifold *old_manifold = &old_manifold_kv->GetValue();
+		old_manifold = &old_manifold_kv->GetValue();
 		ccp_start = old_manifold->mContactPoints;
 		ccp_end = ccp_start + old_manifold->mNumContactPoints;
 
@@ -1236,6 +1239,15 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 		Vec3 t1, t2;
 		constraint->GetTangents(t1, t2);
 
+		// IVP transfers a friction contact's pretension through world space when the
+		// underlying point/edge/triangle contact is replaced. Jolt's normal/friction
+		// warm-start cache intentionally requires nearly identical local points, which is
+		// too strict for a rolling wheel. Keep that world-space spring independently of
+		// the regular Jolt lambda cache. In particular, do not reconstruct it through
+		// mContactNormal: that normal is stored in body 2 space, which is often the rolling
+		// wheel and would incorrectly rotate the ground friction spring with the wheel.
+		bool legacy_contact_used[MaxContactPoints] = { false };
+
 		for (int i = 0; i < num_contact_points; ++i)
 		{
 			// Convert to world space and set positions
@@ -1249,7 +1261,9 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 
 			// Check if we have a close contact point from last update
 			bool lambda_set = false;
-			Vector<2> legacy_friction_displacement = Vector<2>::sZero();
+			int matching_contact_index = -1;
+			Vec3 legacy_friction_displacement = Vec3::sZero();
+			float legacy_friction_normal_lambda = 0.0f;
 			for (const CachedContactPoint *ccp = ccp_start; ccp < ccp_end; ccp++)
 				if (Vec3::sLoadFloat3Unsafe(ccp->mPosition1).IsClose(p1_ls, mPhysicsSettings.mContactPointPreserveLambdaMaxDistSq)
 					&& Vec3::sLoadFloat3Unsafe(ccp->mPosition2).IsClose(p2_ls, mPhysicsSettings.mContactPointPreserveLambdaMaxDistSq))
@@ -1258,7 +1272,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 					wcp.mNonPenetrationConstraint.SetTotalLambda(ccp->mNonPenetrationLambda);
 					wcp.mFrictionConstraint1.SetTotalLambda(ccp->mFrictionLambda[0]);
 					wcp.mFrictionConstraint2.SetTotalLambda(ccp->mFrictionLambda[1]);
-					legacy_friction_displacement = ccp->mVPhysicsFrictionDisplacement;
+					matching_contact_index = int(ccp - ccp_start);
 					lambda_set = true;
 					break;
 				}
@@ -1269,11 +1283,43 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 				wcp.mFrictionConstraint2.SetTotalLambda(0.0f);
 			}
 
+			// The regular warm-start match may legitimately fail as a sphere rolls. IVP does
+			// not discard the friction spring in that case: it transfers pressure and the
+			// world-space pretension to the replacement contact. Match each new point to the
+			// nearest unused old point inside the already-persisted sub-shape manifold.
+			int legacy_contact_index = matching_contact_index;
+			if (legacy_contact_index < 0 || legacy_contact_used[legacy_contact_index])
+			{
+				float closest_distance_sq = FLT_MAX;
+				for (const CachedContactPoint *ccp = ccp_start; ccp < ccp_end; ++ccp)
+				{
+					const int candidate_index = int(ccp - ccp_start);
+					if (legacy_contact_used[candidate_index])
+						continue;
+					const float distance_sq = (Vec3::sLoadFloat3Unsafe(ccp->mPosition1) - p1_ls).LengthSq()
+						+ (Vec3::sLoadFloat3Unsafe(ccp->mPosition2) - p2_ls).LengthSq();
+					if (distance_sq < closest_distance_sq)
+					{
+						closest_distance_sq = distance_sq;
+						legacy_contact_index = candidate_index;
+					}
+				}
+			}
+			if (legacy_contact_index >= 0)
+			{
+				legacy_contact_used[legacy_contact_index] = true;
+				const CachedContactPoint &legacy_contact = ccp_start[legacy_contact_index];
+				legacy_friction_displacement = Vec3::sLoadFloat3Unsafe(
+					legacy_contact.mVPhysicsFrictionDisplacement);
+				legacy_friction_normal_lambda = legacy_contact.mVPhysicsFrictionNormalLambda;
+			}
+
 			// Create new contact point
 			CachedContactPoint &cp = new_manifold->mContactPoints[i];
 			p1_ls.StoreFloat3(&cp.mPosition1);
 			p2_ls.StoreFloat3(&cp.mPosition2);
-			cp.mVPhysicsFrictionDisplacement = legacy_friction_displacement;
+			legacy_friction_displacement.StoreFloat3(&cp.mVPhysicsFrictionDisplacement);
+			cp.mVPhysicsFrictionNormalLambda = legacy_friction_normal_lambda;
 			wcp.mContactPoint = &cp;
 
 			// Setup velocity constraint
@@ -1307,7 +1353,8 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 			cp.mNonPenetrationLambda = 0.0f;
 			cp.mFrictionLambda[0] = 0.0f;
 			cp.mFrictionLambda[1] = 0.0f;
-			cp.mVPhysicsFrictionDisplacement.SetZero();
+			Vec3::sZero().StoreFloat3(&cp.mVPhysicsFrictionDisplacement);
+			cp.mVPhysicsFrictionNormalLambda = 0.0f;
 		}
 	}
 
@@ -1792,6 +1839,7 @@ bool ContactConstraintManager::sSolveLegacyFrictionConstraint(ContactConstraintB
 	ContactConstraint<Type1, Type2> &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
 	Vec3 t1, t2;
 	constraint.GetTangents(t1, t2);
+	const Vec3 ws_normal = constraint.GetWorldSpaceNormal();
 
 	Vec3 linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2;
 	sGetVelocities<Type1, Type2>(ioMotionProperties1, ioMotionProperties2, linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2);
@@ -1803,20 +1851,22 @@ bool ContactConstraintManager::sSolveLegacyFrictionConstraint(ContactConstraintB
 		if (!wcp.mFrictionConstraint1.IsActive() && !wcp.mFrictionConstraint2.IsActive())
 			continue;
 
-		Vector<2> &displacement = wcp.mContactPoint->mVPhysicsFrictionDisplacement;
+		Vec3 displacement = Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mVPhysicsFrictionDisplacement);
+		// Match IVP's contact replacement path: preserve the old world-space friction
+		// vector, then project it into the current contact plane before integrating slip.
+		displacement -= ws_normal * displacement.Dot(ws_normal);
 		const float relative_velocity1 = wcp.mFrictionConstraint1.GetVelocityConstraintValue(
 			linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, t1)
 			- wcp.mFrictionConstraint1.GetVelocityBias();
 		const float relative_velocity2 = wcp.mFrictionConstraint2.GetVelocityConstraintValue(
 			linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, t2)
 			- wcp.mFrictionConstraint2.GetVelocityBias();
-		displacement[0] += relative_velocity1 * inDeltaTime;
-		displacement[1] += relative_velocity2 * inDeltaTime;
+		displacement += (t1 * relative_velocity1 + t2 * relative_velocity2) * inDeltaTime;
 
 		// IVP clips its tangential spring displacement to the distance that last frame's
 		// normal pressure can traverse during one PSI. The cached normal lambda is impulse,
 		// so pressure * dt collapses back to that lambda here.
-		const float normal_lambda = max(0.0f, wcp.mNonPenetrationConstraint.GetTotalLambda());
+		const float normal_lambda = max(0.0f, wcp.mContactPoint->mVPhysicsFrictionNormalLambda);
 		const float max_friction_lambda = constraint.mCombinedFriction * normal_lambda;
 		const float inverse_virtual_mass = max(
 			wcp.mFrictionConstraint1.GetInverseEffectiveMass(),
@@ -1825,6 +1875,7 @@ bool ContactConstraintManager::sSolveLegacyFrictionConstraint(ContactConstraintB
 		const float displacement_length_sq = displacement.LengthSq();
 		if (displacement_length_sq > Square(max_displacement) && displacement_length_sq > 0.0f)
 			displacement *= max_displacement / Sqrt(displacement_length_sq);
+		displacement.StoreFloat3(&wcp.mContactPoint->mVPhysicsFrictionDisplacement);
 
 		// IVP does not replay last frame's tangential impulse. It solves a fresh local
 		// constraint that drives the integrated friction spring back toward zero.
@@ -1832,10 +1883,10 @@ bool ContactConstraintManager::sSolveLegacyFrictionConstraint(ContactConstraintB
 		wcp.mFrictionConstraint2.SetTotalLambda(0.0f);
 		float lambda1 = wcp.mFrictionConstraint1.SolveVelocityConstraintGetTotalLambda(
 			linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, t1,
-			-displacement[0] / inDeltaTime);
+			-displacement.Dot(t1) / inDeltaTime);
 		float lambda2 = wcp.mFrictionConstraint2.SolveVelocityConstraintGetTotalLambda(
 			linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, t2,
-			-displacement[1] / inDeltaTime);
+			-displacement.Dot(t2) / inDeltaTime);
 		const float total_lambda_sq = Square(lambda1) + Square(lambda2);
 		if (total_lambda_sq > Square(max_friction_lambda) && total_lambda_sq > 0.0f)
 		{
@@ -1984,7 +2035,8 @@ void ContactConstraintManager::sResetLegacyFrictionState(ContactConstraintBase &
 		WorldContactPoint<Type1, Type2> &wcp = constraint.mContactPoints[i];
 		wcp.mFrictionConstraint1.SetTotalLambda(0.0f);
 		wcp.mFrictionConstraint2.SetTotalLambda(0.0f);
-		wcp.mContactPoint->mVPhysicsFrictionDisplacement.SetZero();
+		Vec3::sZero().StoreFloat3(&wcp.mContactPoint->mVPhysicsFrictionDisplacement);
+		wcp.mContactPoint->mVPhysicsFrictionNormalLambda = 0.0f;
 	}
 }
 
@@ -2072,6 +2124,7 @@ void ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioCo
 		wcp.mContactPoint->mNonPenetrationLambda = wcp.mNonPenetrationConstraint.GetTotalLambda();
 		wcp.mContactPoint->mFrictionLambda[0] = wcp.mFrictionConstraint1.GetTotalLambda();
 		wcp.mContactPoint->mFrictionLambda[1] = wcp.mFrictionConstraint2.GetTotalLambda();
+		wcp.mContactPoint->mVPhysicsFrictionNormalLambda = wcp.mNonPenetrationConstraint.GetTotalLambda();
 	}
 }
 
