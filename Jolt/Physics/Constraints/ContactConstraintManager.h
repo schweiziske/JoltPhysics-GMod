@@ -485,6 +485,7 @@ private:
 
 		Body *					mBody1;
 		Body *					mBody2;
+		SubShapeIDPair			mSubShapePair;
 		uint64					mSortKey;
 		Float3					mWorldSpaceNormal;
 		float					mCombinedFriction;
@@ -568,7 +569,7 @@ private:
 
 	/// Internal helper function to store lambdas applied during sSolveVelocityConstraint.
 	template <EMotionType Type1, EMotionType Type2>
-	static void					sStoreAppliedImpulses(ContactConstraintBase &ioConstraint);
+	static float					sStoreAppliedImpulses(ContactConstraintBase &ioConstraint);
 
 	/// Internal helper function to solve a single position constraint. Templated to the motion type to reduce the amount of branches and calculations.
 	template <EMotionType Type1, EMotionType Type2>

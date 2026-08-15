@@ -123,6 +123,12 @@ public:
 	/// callbacks are triggered) and resolving the sub shape ID against both the old and new shape to see if they still refer to the same child shape.
 	virtual void			OnContactPersisted([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, [[maybe_unused]] const ContactManifold &inManifold, [[maybe_unused]] ContactSettings &ioSettings) { /* Do nothing */ }
 
+	/// Called after the velocity solver has stored the final normal impulse for a contact manifold.
+	/// This adapter extension exposes the resolved pressure needed by Source's friction snapshot;
+	/// OnContactAdded / OnContactPersisted run before solving and can only estimate it.
+	/// The impulse is the sum of all contact-point normal lambdas for this collision step.
+	virtual void			OnContactSolved([[maybe_unused]] const SubShapeIDPair &inSubShapePair, [[maybe_unused]] float inNormalImpulse) { /* Do nothing */ }
+
 	/// Called whenever a contact was detected last update but is not detected anymore.
 	///
 	/// You cannot access the bodies at the time of this callback because:

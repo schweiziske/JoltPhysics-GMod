@@ -913,6 +913,7 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 				break;
 			}
 			constraint->mContactImpacting = settings.mVPhysicsImpactingContact;
+			constraint->mSubShapePair = input_key;
 
 			JPH_DET_LOG("GetContactsFromCache: id1: " << inBody1.GetID() << " id2: " << inBody2.GetID() << " key: " << constraint->mSortKey);
 
@@ -1201,6 +1202,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 			return;
 		}
 		constraint->mContactImpacting = settings.mVPhysicsImpactingContact;
+		constraint->mSubShapePair = key;
 
 		JPH_DET_LOG("AddContactConstraint: id1: " << constraint->mBody1->GetID() << " id2: " << constraint->mBody2->GetID() << " key: " << constraint->mSortKey);
 
@@ -2113,25 +2115,29 @@ bool ContactConstraintManager::AreAnyContactsImpacting(const uint32 *inConstrain
 }
 
 template <EMotionType Type1, EMotionType Type2>
-void ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioConstraint)
+float ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioConstraint)
 {
 	ContactConstraint<Type1, Type2> &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
+	float normal_impulse = 0.0f;
 
 	for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
 	{
 		WorldContactPoint<Type1, Type2> &wcp = constraint.mContactPoints[i];
 
-		wcp.mContactPoint->mNonPenetrationLambda = wcp.mNonPenetrationConstraint.GetTotalLambda();
+		const float point_normal_impulse = wcp.mNonPenetrationConstraint.GetTotalLambda();
+		wcp.mContactPoint->mNonPenetrationLambda = point_normal_impulse;
 		wcp.mContactPoint->mFrictionLambda[0] = wcp.mFrictionConstraint1.GetTotalLambda();
 		wcp.mContactPoint->mFrictionLambda[1] = wcp.mFrictionConstraint2.GetTotalLambda();
-		wcp.mContactPoint->mVPhysicsFrictionNormalLambda = wcp.mNonPenetrationConstraint.GetTotalLambda();
+		wcp.mContactPoint->mVPhysicsFrictionNormalLambda = point_normal_impulse;
+		normal_impulse += point_normal_impulse;
 	}
+	return normal_impulse;
 }
 
 void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const
 {
 	// Build dispatch table
-	using DispatchFunc = void (*)(ContactConstraintBase &);
+	using DispatchFunc = float (*)(ContactConstraintBase &);
 	static const DispatchFunc table[3][3] = {
 		{
 			nullptr, // Static vs static doesn't exist
@@ -2167,7 +2173,9 @@ void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inConstraintOf
 			next_constraint = nullptr;
 
 		// Dispatch to the correct templated form
-		table[(int)constraint.mBody1->GetMotionType()][(int)constraint.mBody2->GetMotionType()](constraint);
+		const float normal_impulse = table[(int)constraint.mBody1->GetMotionType()][(int)constraint.mBody2->GetMotionType()](constraint);
+		if (mContactListener != nullptr)
+			mContactListener->OnContactSolved(constraint.mSubShapePair, normal_impulse);
 	}
 }
 
