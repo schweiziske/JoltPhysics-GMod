@@ -231,6 +231,7 @@ public:
 
 	/// True when any contact in this range is predicted to enter IVP's impact distance this update.
 	bool						AreAnyContactsImpacting(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
+	bool						AreAnyContactsUsingVPhysicsSolver(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
 
 	/// Save back the lambdas to the contact cache for the next warm start
 	void						StoreAppliedImpulses(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
@@ -502,6 +503,8 @@ private:
 		uint32					mNumContactPoints;
 		bool					mContactImpacting = false;
 		bool					mContactHasCachedSupport = false;
+		bool					mUseVPhysicsSolver = false;
+		bool					mDisablePenetrationRecovery = false;
 	};
 
 	/// Contact constraint class, used for solving penetrations

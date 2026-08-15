@@ -1542,7 +1542,10 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 			bool is_large_island = true;
 		#endif
 			CalculateSolverSteps steps_calculator(mPhysicsSettings);
+			const bool has_vphysics_contacts = mContactManager.AreAnyContactsUsingVPhysicsSolver(
+				contacts_begin, contacts_end);
 			if (!mPhysicsSettings.mUseLargeIslandSplitter
+				|| has_vphysics_contacts
 				|| !mLargeIslandSplitter.SplitIsland(island_idx, mIslandBuilder, mBodyManager, mContactManager, active_constraints, steps_calculator))
 			{
 			#ifdef JPH_TRACK_SIMULATION_STATS
@@ -1552,8 +1555,9 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				// We didn't create a split, just run the solver now for this entire island. Begin by warm starting.
 				const bool has_legacy_constraints = ConstraintManager::sHasLegacyConstraints(
 					active_constraints, constraints_begin, constraints_end);
+				const bool use_legacy_contact_solver = has_legacy_constraints || has_vphysics_contacts;
 				ConstraintManager::sWarmStartVelocityConstraints(active_constraints, constraints_begin, constraints_end, warm_start_impulse_ratio, steps_calculator);
-				if (has_legacy_constraints)
+				if (use_legacy_contact_solver)
 					mContactManager.RegisterVelocityConstraints(contacts_begin, contacts_end, steps_calculator);
 				else
 					mContactManager.WarmStartVelocityConstraints(contacts_begin, contacts_end, warm_start_impulse_ratio, steps_calculator);
@@ -1596,7 +1600,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				for (uint velocity_step = 0; velocity_step < num_velocity_steps; ++velocity_step)
 				{
 					bool applied_impulse = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
-					if (has_legacy_constraints)
+					if (use_legacy_contact_solver)
 					{
 						if (velocity_step == 0)
 						{
