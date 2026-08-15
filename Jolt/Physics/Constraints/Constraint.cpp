@@ -12,6 +12,8 @@
 #include <Jolt/Core/StreamUtils.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 
 JPH_NAMESPACE_BEGIN
 
@@ -190,10 +192,18 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 
 	bool appliedImpulse = false;
 	bool groupBroken = false;
-	auto solveConstraint = [&](Constraint *constraint, float tauFactor, float dampingFactor)
+	const bool traceGroupSolves = std::getenv("VJOLT_TRACE_LEGACY_GROUP_SOLVES") != nullptr;
+	uint32 solveOrdinal = 0;
+	if (traceGroupSolves)
+		std::fprintf(stderr, "LEGACY_GROUP_BEGIN group=%p count=%zu additional=%d caller=%p\n",
+			static_cast<void *>(this), mConstraints.size(), mAdditionalIterations,
+			static_cast<void *>(inCaller));
+	auto solveConstraint = [&](Constraint *constraint, float tauFactor, float dampingFactor,
+		const char *phase, int64 iteration, size_t constraintIndex)
 	{
 		if (groupBroken)
 			return;
+		++solveOrdinal;
 		constraint->SetLegacySolveFactors(tauFactor, dampingFactor);
 		const TwoBodyConstraint *two_body = constraint->GetType() == EConstraintType::TwoBodyConstraint?
 			static_cast<const TwoBodyConstraint *>(constraint) : nullptr;
@@ -202,6 +212,23 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 		const Vec3 linear2 = two_body? two_body->GetBody2()->GetLinearVelocity() : Vec3::sZero();
 		const Vec3 angular2 = two_body? two_body->GetBody2()->GetAngularVelocity() : Vec3::sZero();
 		appliedImpulse |= constraint->SolveVelocityConstraint(inDeltaTime);
+		if (traceGroupSolves && two_body)
+		{
+			const Vec3 postLinear1 = two_body->GetBody1()->GetLinearVelocity();
+			const Vec3 postAngular1 = two_body->GetBody1()->GetAngularVelocity();
+			const Vec3 postLinear2 = two_body->GetBody2()->GetLinearVelocity();
+			const Vec3 postAngular2 = two_body->GetBody2()->GetAngularVelocity();
+			std::fprintf(stderr,
+				"LEGACY_GROUP_SOLVE group=%p ordinal=%u phase=%s iteration=%lld index=%zu subtype=%u b1=%u pre_v=(%.9g,%.9g,%.9g) pre_w=(%.9g,%.9g,%.9g) post_v=(%.9g,%.9g,%.9g) post_w=(%.9g,%.9g,%.9g) b2=%u pre_v=(%.9g,%.9g,%.9g) pre_w=(%.9g,%.9g,%.9g) post_v=(%.9g,%.9g,%.9g) post_w=(%.9g,%.9g,%.9g)\n",
+				static_cast<void *>(this), solveOrdinal, phase, static_cast<long long>(iteration),
+				constraintIndex, uint(constraint->GetSubType()),
+				two_body->GetBody1()->GetID().GetIndexAndSequenceNumber(),
+				linear1.GetX(), linear1.GetY(), linear1.GetZ(), angular1.GetX(), angular1.GetY(), angular1.GetZ(),
+				postLinear1.GetX(), postLinear1.GetY(), postLinear1.GetZ(), postAngular1.GetX(), postAngular1.GetY(), postAngular1.GetZ(),
+				two_body->GetBody2()->GetID().GetIndexAndSequenceNumber(),
+				linear2.GetX(), linear2.GetY(), linear2.GetZ(), angular2.GetX(), angular2.GetY(), angular2.GetZ(),
+				postLinear2.GetX(), postLinear2.GetY(), postLinear2.GetZ(), postAngular2.GetX(), postAngular2.GetY(), postAngular2.GetZ());
+		}
 		if (constraint->CheckLegacyBreakAfterSolve(linear1, angular1, linear2, angular2, mRollbackOnBreak)
 			&& mRollbackOnBreak)
 		{
@@ -209,31 +236,39 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 			groupBroken = true;
 		}
 	};
-	auto solveForward = [&](float tauFactor, float dampingFactor)
+	auto solveForward = [&](float tauFactor, float dampingFactor, int64 iteration)
 	{
-		for (Constraint *constraint : mConstraints)
+		for (size_t index = 0; index < mConstraints.size(); ++index)
+		{
+			Constraint *constraint = mConstraints[index];
 			if (constraint->IsActive())
-				solveConstraint(constraint, tauFactor, dampingFactor);
+				solveConstraint(constraint, tauFactor, dampingFactor, "forward", iteration, index);
+		}
 	};
-	auto solveReverse = [&](float tauFactor, float dampingFactor)
+	auto solveReverse = [&](float tauFactor, float dampingFactor, int64 iteration)
 	{
-		for (auto it = mConstraints.rbegin(); it != mConstraints.rend(); ++it)
-			if ((*it)->IsActive())
-				solveConstraint(*it, tauFactor, dampingFactor);
+		for (size_t reverseIndex = mConstraints.size(); reverseIndex > 0; --reverseIndex)
+		{
+			const size_t index = reverseIndex - 1;
+			Constraint *constraint = mConstraints[index];
+			if (constraint->IsActive())
+				solveConstraint(constraint, tauFactor, dampingFactor, "reverse", iteration, index);
+		}
 	};
 	auto setupAndSolveForward = [&](float tauFactor, float dampingFactor)
 	{
 		// Havana's setup_and_step_constraint is interleaved per constraint. Do not set up the
 		// complete group first: a later predictive Length constraint must observe velocity impulses
 		// written by an earlier Ragdoll/Fixed setup solve in the same local controller pass.
-		for (Constraint *constraint : mConstraints)
+		for (size_t index = 0; index < mConstraints.size(); ++index)
 		{
+			Constraint *constraint = mConstraints[index];
 			if (groupBroken)
 				break;
 			if (constraint->IsActive())
 			{
 				constraint->SetupVelocityConstraint(inDeltaTime);
-				solveConstraint(constraint, tauFactor, dampingFactor);
+				solveConstraint(constraint, tauFactor, dampingFactor, "setup", -1, index);
 			}
 		}
 	};
@@ -254,9 +289,12 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 			&& tau_factors[iteration] != 0.0f && !groupBroken;
 		++iteration)
 	{
-		solveReverse(tau_factors[iteration], damping_factors[iteration]);
-		solveForward(tau_factors[iteration], damping_factors[iteration]);
+		solveReverse(tau_factors[iteration], damping_factors[iteration], iteration);
+		solveForward(tau_factors[iteration], damping_factors[iteration], iteration);
 	}
+	if (traceGroupSolves)
+		std::fprintf(stderr, "LEGACY_GROUP_END group=%p solves=%u broken=%d\n",
+			static_cast<void *>(this), solveOrdinal, groupBroken ? 1 : 0);
 
 	(void)inCaller;
 	return appliedImpulse;
