@@ -204,6 +204,11 @@ public:
 		return this->mBias;
 	}
 
+	JPH_INLINE void			SetVelocityBias(float inBias)
+	{
+		this->mBias = inBias;
+	}
+
 	/// Part 1 of AxisConstraint::SolveVelocityConstraint: get the total lambda
 	JPH_INLINE float			SolveVelocityConstraintGetTotalLambda(Vec3Arg inLinearVelocity1, Vec3Arg inAngularVelocity1, Vec3Arg inLinearVelocity2, Vec3Arg inAngularVelocity2, Vec3Arg inWorldSpaceAxis, float inAdditionalBias = 0.0f) const
 	{

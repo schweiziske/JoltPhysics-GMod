@@ -1552,9 +1552,6 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				// We didn't create a split, just run the solver now for this entire island. Begin by warm starting.
 				const bool has_legacy_constraints = ConstraintManager::sHasLegacyConstraints(
 					active_constraints, constraints_begin, constraints_end);
-				const bool has_contacts = contacts_begin != contacts_end;
-				const bool any_contact_impacting = has_contacts
-					&& mContactManager.AreAnyContactsImpacting(contacts_begin, contacts_end);
 				ConstraintManager::sWarmStartVelocityConstraints(active_constraints, constraints_begin, constraints_end, warm_start_impulse_ratio, steps_calculator);
 				if (has_legacy_constraints)
 					mContactManager.RegisterVelocityConstraints(contacts_begin, contacts_end, steps_calculator);
@@ -1604,30 +1601,21 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 						if (velocity_step == 0)
 						{
 							trace_legacy_bodies("pre");
-							if (any_contact_impacting)
-							{
-								// IVP runs the PSI controller before its impact system.
-								mContactManager.ResetLegacyFrictionState(contacts_begin, contacts_end);
-								mContactManager.ResetNonPenetrationLambdas(contacts_begin, contacts_end);
-								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
-								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
-								trace_legacy_bodies("after_havana_impact");
-								applied_impulse |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
-								trace_legacy_bodies("after_contact_impact");
-							}
-							else
-							{
-								// Single-contact IVP controller order: dynamic tangential friction,
-								// Havana constraints, then the static normal distance keeper.
-								applied_impulse |= mContactManager.SolveLegacyFrictionConstraints(contacts_begin, contacts_end, delta_time);
-								trace_legacy_bodies("after_friction");
-								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
-								applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
-								trace_legacy_bodies("after_havana");
-								mContactManager.ResetNonPenetrationLambdas(contacts_begin, contacts_end);
-								applied_impulse |= mContactManager.SolveNonPenetrationConstraints(contacts_begin, contacts_end);
-								trace_legacy_bodies("after_normal");
-							}
+							// IVP evaluates each contact controller independently. A fresh impact on one
+							// wheel must not disable the already-established distance keepers on the other
+							// wheels in the same constraint island.
+							mContactManager.ResetImpactingLegacyFrictionState(contacts_begin, contacts_end);
+							applied_impulse |= mContactManager.SolveLegacyFrictionConstraints(contacts_begin, contacts_end, delta_time);
+							trace_legacy_bodies("after_friction");
+							applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
+							applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
+							trace_legacy_bodies("after_havana");
+							applied_impulse |= mContactManager.SolveVPhysicsImpactConstraints(contacts_begin, contacts_end, delta_time);
+							trace_legacy_bodies("after_contact_impact");
+							mContactManager.ResetNonPenetrationLambdas(contacts_begin, contacts_end);
+							applied_impulse |= mContactManager.SolvePersistentNonPenetrationConstraints(contacts_begin, contacts_end);
+							mContactManager.IntegrateLegacyFrictionState(contacts_begin, contacts_end, delta_time);
+							trace_legacy_bodies("after_normal");
 						}
 					}
 					else
@@ -1728,6 +1716,10 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 				mp->ClampAngularVelocity();
 			}
 
+			// Apply the pre-impact share of a legacy event-time step before integrating the
+			// post-impact angular velocity over the ordinary full Jolt step.
+			body.AddRotationStep(mp->ConsumeVPhysicsRotationCorrection());
+
 			// Update the rotation of the body according to the angular velocity
 			// For motion type discrete we need to do this anyway, for motion type linear cast we have multiple choices
 			// 1. Rotate the body first and then sweep
@@ -1742,7 +1734,8 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 			body.AddRotationStep(body.GetAngularVelocity() * delta_time);
 
 			// Get delta position
-			Vec3 delta_pos = body.GetLinearVelocity() * delta_time;
+			Vec3 delta_pos = mp->ConsumeVPhysicsPositionCorrection()
+				+ body.GetLinearVelocity() * delta_time;
 
 			// If the position should be updated (or if it is delayed because of CCD)
 			bool update_position = true;

@@ -219,11 +219,14 @@ public:
 	/// Restitution is only applied when v_n^- is large enough and the points are moving towards collision
 	bool						SolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 	bool						SolveFrictionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	bool						SolveVPhysicsImpactConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inDeltaTime);
 	bool						SolveLegacyFrictionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inDeltaTime);
+	void						IntegrateLegacyFrictionState(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inDeltaTime);
 	bool						SolveNonPenetrationConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	bool						SolvePersistentNonPenetrationConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 	void						ResetFrictionLambdas(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 	void						ResetNonPenetrationLambdas(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
-	void						ResetLegacyFrictionState(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	void						ResetImpactingLegacyFrictionState(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 
 
 	/// True when any contact in this range is predicted to enter IVP's impact distance this update.
@@ -300,9 +303,10 @@ private:
 		/// rolling contact replaces its geometric contact point inside the same manifold.
 		Float3					mVPhysicsFrictionDisplacement;
 		float					mVPhysicsFrictionNormalLambda;
+		bool					mVPhysicsContactEstablished;
 	};
 
-	static_assert(sizeof(CachedContactPoint) == 52, "Unexpected size");
+	static_assert(sizeof(CachedContactPoint) == 56, "Unexpected size");
 	static_assert(alignof(CachedContactPoint) == 4, "Assuming 4 byte aligned");
 
 	/// A single cached manifold
@@ -343,7 +347,7 @@ private:
 		CachedContactPoint		mContactPoints[1];
 	};
 
-	static_assert(sizeof(CachedManifold) == 72, "This structure is expect to not contain any waste due to alignment");
+	static_assert(sizeof(CachedManifold) == 76, "This structure is expect to not contain any waste due to alignment");
 	static_assert(alignof(CachedManifold) == 4, "Assuming 4 byte aligned");
 
 	/// Define a map that maps SubShapeIDPair -> manifold
@@ -489,12 +493,15 @@ private:
 		uint64					mSortKey;
 		Float3					mWorldSpaceNormal;
 		float					mCombinedFriction;
+		float					mCombinedRestitution;
+		float					mMinVelocityForRestitution;
 		float					mInvMass1;
 		float					mInvInertiaScale1;
 		float					mInvMass2;
 		float					mInvInertiaScale2;
 		uint32					mNumContactPoints;
 		bool					mContactImpacting = false;
+		bool					mContactHasCachedSupport = false;
 	};
 
 	/// Contact constraint class, used for solving penetrations
@@ -552,11 +559,17 @@ private:
 	template <EMotionType Type1, EMotionType Type2, bool SolveFriction, bool SolveNonPenetration>
 	static bool					sSolveVelocityConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2);
 
-	template <bool SolveFriction, bool SolveNonPenetration>
+	template <EMotionType Type1, EMotionType Type2>
+	static bool					sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget);
+
+	template <bool SolveFriction, bool SolveNonPenetration, bool PersistentOnly>
 	bool						TemplatedSolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 
 	template <EMotionType Type1, EMotionType Type2>
 	static bool					sSolveLegacyFrictionConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime);
+
+	template <EMotionType Type1, EMotionType Type2>
+	static void					sIntegrateLegacyFrictionState(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime);
 
 	template <EMotionType Type1, EMotionType Type2, bool ResetFriction, bool ResetNonPenetration>
 	static void					sResetVelocityConstraintLambdas(ContactConstraintBase &ioConstraint);

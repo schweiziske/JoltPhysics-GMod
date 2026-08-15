@@ -236,6 +236,27 @@ public:
 	}
 	inline void				AddAngularVelocityStep(Vec3Arg inAngularVelocityChange)			{ ApplyAngularVelocityStep(mAngularVelocity + inAngularVelocityChange); }
 	inline void				SubAngularVelocityStep(Vec3Arg inAngularVelocityChange)			{ ApplyAngularVelocityStep(mAngularVelocity - inAngularVelocityChange); }
+
+	/// Accumulate a one-update integration correction for a legacy event-time impact. The velocity
+	/// solver publishes the post-impact velocity immediately, while the position integrator consumes
+	/// these offsets so that velocity only applies after the actual time of impact.
+	inline void				AddVPhysicsIntegrationCorrection(Vec3Arg inPositionCorrection, Vec3Arg inRotationCorrection)
+	{
+		mVPhysicsPositionCorrection += LockTranslation(inPositionCorrection);
+		mVPhysicsRotationCorrection += LockAngular(inRotationCorrection);
+	}
+	inline Vec3				ConsumeVPhysicsPositionCorrection()
+	{
+		Vec3 correction = mVPhysicsPositionCorrection;
+		mVPhysicsPositionCorrection = Vec3::sZero();
+		return correction;
+	}
+	inline Vec3				ConsumeVPhysicsRotationCorrection()
+	{
+		Vec3 correction = mVPhysicsRotationCorrection;
+		mVPhysicsRotationCorrection = Vec3::sZero();
+		return correction;
+	}
 	///@}
 
 	/// Apply the gyroscopic force (aka Dzhanibekov effect, see https://en.wikipedia.org/wiki/Tennis_racket_theorem)
@@ -310,6 +331,9 @@ private:
 #endif // JPH_DOUBLE_PRECISION
 	Sphere					mSleepTestSpheres[3];											///< Measure motion for 3 points on the body to see if it is resting: COM, COM + largest bounding box axis, COM + second largest bounding box axis
 	float					mSleepTestTimer;												///< How long this body has been within the movement tolerance
+
+	Vec3					mVPhysicsPositionCorrection { Vec3::sZero() };				///< Transient event-time position correction, consumed during integration.
+	Vec3					mVPhysicsRotationCorrection { Vec3::sZero() };				///< Transient event-time rotation correction, consumed during integration.
 
 #ifdef JPH_ENABLE_ASSERTS
 	EBodyType				mCachedBodyType;												///< Copied from Body::mBodyType and cached for asserting purposes
