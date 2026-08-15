@@ -34,6 +34,9 @@
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Core/QuickSort.h>
 #include <Jolt/Core/ScopeExit.h>
+#ifdef JPH_PLATFORM_WINDOWS
+	#include <Jolt/Core/IncludeWindows.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #ifdef JPH_DEBUG_RENDERER
@@ -41,6 +44,15 @@
 #endif // JPH_DEBUG_RENDERER
 
 JPH_NAMESPACE_BEGIN
+
+static bool IsLegacyTraceEnvironmentFlagSet(const char *inName)
+{
+#ifdef JPH_PLATFORM_WINDOWS
+	return GetEnvironmentVariableA(inName, nullptr, 0) != 0;
+#else
+	return std::getenv(inName) != nullptr;
+#endif
+}
 
 #ifdef JPH_DEBUG_RENDERER
 bool PhysicsSystem::sDrawMotionQualityLinearCast = false;
@@ -1556,7 +1568,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				// Solve velocity constraints
 				const uint num_velocity_steps = steps_calculator.GetNumVelocitySteps();
 				const bool trace_legacy_stages = has_legacy_constraints
-					&& std::getenv("VJOLT_TRACE_LEGACY_STAGES") != nullptr;
+					&& IsLegacyTraceEnvironmentFlagSet("VJOLT_TRACE_LEGACY_STAGES");
 				auto trace_legacy_bodies = [&](const char *inStage)
 				{
 					if (!trace_legacy_stages)
@@ -1574,12 +1586,14 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 						const Vec3 w1 = body1->GetAngularVelocity();
 						const Vec3 v2 = body2->GetLinearVelocity();
 						const Vec3 w2 = body2->GetAngularVelocity();
+						if (IsLegacyTraceEnvironmentFlagSet("VJOLT_TRACE_LEGACY_LARGE_ONLY")
+							&& w1.LengthSq() < 1.0f && w2.LengthSq() < 1.0f)
+							continue;
 						std::fprintf(stderr,
-							"LEGACY_STAGE %s b1=%u v=(%.9g,%.9g,%.9g) w=(%.9g,%.9g,%.9g) b2=%u v=(%.9g,%.9g,%.9g) w=(%.9g,%.9g,%.9g)\n",
-							inStage, body1->GetID().GetIndexAndSequenceNumber(), v1.GetX(), v1.GetY(), v1.GetZ(),
+							"LEGACY_STAGE %s subtype=%u b1=%u v=(%.9g,%.9g,%.9g) w=(%.9g,%.9g,%.9g) b2=%u v=(%.9g,%.9g,%.9g) w=(%.9g,%.9g,%.9g)\n",
+							inStage, uint(constraint->GetSubType()), body1->GetID().GetIndexAndSequenceNumber(), v1.GetX(), v1.GetY(), v1.GetZ(),
 							w1.GetX(), w1.GetY(), w1.GetZ(), body2->GetID().GetIndexAndSequenceNumber(),
 							v2.GetX(), v2.GetY(), v2.GetZ(), w2.GetX(), w2.GetY(), w2.GetZ());
-						break;
 					}
 				};
 				for (uint velocity_step = 0; velocity_step < num_velocity_steps; ++velocity_step)
