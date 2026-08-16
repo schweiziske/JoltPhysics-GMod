@@ -250,6 +250,10 @@ public:
 	/// - During the ContactListener::OnContactRemoved callback this function can be used to determine if this is the last contact pair between the bodies (function returns false) or if there are other contacts still present (function returns true).
 	bool						WereBodiesInContact(const BodyID &inBody1ID, const BodyID &inBody2ID) const { return mContactManager.WereBodiesInContact(inBody1ID, inBody2ID); }
 
+	/// Neutralize only the cached tangential state for one VPhysics contact manifold.
+	/// Normal support and contact lifetime are deliberately preserved.
+	bool						ClearVPhysicsFrictionState(const BodyID &inBody1ID, const SubShapeID &inSubShapeID1, const BodyID &inBody2ID, const SubShapeID &inSubShapeID2) { return mContactManager.ClearVPhysicsFrictionState(inBody1ID, inSubShapeID1, inBody2ID, inSubShapeID2); }
+
 	/// Get the bounding box of all bodies in the physics system.
 	/// Deprecated: Use GetBroadPhaseQuery().GetBounds() instead.
 	AABox						GetBounds() const											{ return mBroadPhase->GetBounds(); }

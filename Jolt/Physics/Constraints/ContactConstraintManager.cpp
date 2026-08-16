@@ -1772,6 +1772,39 @@ bool ContactConstraintManager::WereBodiesInContact(const BodyID &inBody1ID, cons
 	return kv != nullptr && kv->GetValue().mFirstCachedManifold != ManifoldMap::cInvalidHandle;
 }
 
+bool ContactConstraintManager::ClearVPhysicsFrictionState(const BodyID &inBody1ID, const SubShapeID &inSubShapeID1, const BodyID &inBody2ID, const SubShapeID &inSubShapeID2)
+{
+	JPH_ASSERT(mUpdateContext == nullptr, "Cannot modify the contact cache during PhysicsSystem::Update");
+
+	ManifoldCache &read_cache = mCache[mCacheWriteIdx ^ 1];
+	auto find_manifold = [&read_cache](const SubShapeIDPair &inKey) -> MKeyValue *
+	{
+		return const_cast<MKeyValue *>(read_cache.Find(inKey, inKey.GetHash()));
+	};
+
+	SubShapeIDPair key(inBody1ID, inSubShapeID1, inBody2ID, inSubShapeID2);
+	MKeyValue *kv = find_manifold(key);
+	if (kv == nullptr)
+	{
+		// Friction snapshots are published from both bodies' point of view, while
+		// Jolt stores only the narrow phase's original body ordering.
+		key = SubShapeIDPair(inBody2ID, inSubShapeID2, inBody1ID, inSubShapeID1);
+		kv = find_manifold(key);
+	}
+	if (kv == nullptr)
+		return false;
+
+	CachedManifold &manifold = kv->GetValue();
+	for (uint32 point_idx = 0; point_idx < manifold.mNumContactPoints; ++point_idx)
+	{
+		CachedContactPoint &point = manifold.mContactPoints[point_idx];
+		point.mFrictionLambda[0] = 0.0f;
+		point.mFrictionLambda[1] = 0.0f;
+		Vec3::sZero().StoreFloat3(&point.mVPhysicsFrictionDisplacement);
+	}
+	return true;
+}
+
 template <EMotionType Type1, EMotionType Type2>
 void ContactConstraintManager::sGetVelocities(const MotionProperties *inMotionProperties1, const MotionProperties *inMotionProperties2, Vec3 &outLinearVelocity1, Vec3 &outAngularVelocity1, Vec3 &outLinearVelocity2, Vec3 &outAngularVelocity2)
 {

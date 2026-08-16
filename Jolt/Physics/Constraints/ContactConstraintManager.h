@@ -158,6 +158,12 @@ public:
 	/// Uses the read collision cache to determine if 2 bodies are in contact.
 	bool						WereBodiesInContact(const BodyID &inBody1ID, const BodyID &inBody2ID) const;
 
+	/// Clear only the cached tangential state for one contact manifold. This is the
+	/// VPhysics equivalent of IVP_Contact_Point::set_friction_to_neutral(): normal
+	/// support, contact lifetime and accumulated normal pressure remain intact.
+	/// Must only be called while PhysicsSystem::Update is not running.
+	bool						ClearVPhysicsFrictionState(const BodyID &inBody1ID, const SubShapeID &inSubShapeID1, const BodyID &inBody2ID, const SubShapeID &inSubShapeID2);
+
 	/// Get the number of contact constraints that were found
 	uint32						GetNumConstraints() const											{ return min<uint32>(uint32(mNumConstraintsAndNextConstraintOffset.load(memory_order_relaxed)), mMaxConstraints); }
 
@@ -622,7 +628,7 @@ private:
 	atomic<uint64>				mNumConstraintsAndNextConstraintOffset { 0 }; // Lower 32 bits: number of constraints, upper 32 bits next constraint offset
 
 	/// Context used for this physics update
-	PhysicsUpdateContext *		mUpdateContext;
+	PhysicsUpdateContext *		mUpdateContext = nullptr;
 };
 
 JPH_NAMESPACE_END
