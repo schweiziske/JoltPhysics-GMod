@@ -10,6 +10,7 @@
 #include <Jolt/ObjectStream/SerializableObject.h>
 
 #include <atomic>
+#include <cstddef>
 #include <vector>
 
 JPH_NAMESPACE_BEGIN
@@ -219,6 +220,25 @@ public:
 	/// Per-scan coefficients used by Source/Havana local constraint systems. Native Jolt
 	/// constraints ignore these; compatibility constraints consume them during SolveVelocityConstraint.
 	virtual void				SetLegacySolveFactors(float inTauFactor, float inDampingFactor) { }
+	/// Size/alignment of the transient Source/Havana solver work area. A legacy group packs all
+	/// active members into one contiguous scratch buffer for the duration of a physics step.
+	virtual size_t				GetLegacySolverStorageSize() const { return 0; }
+	virtual size_t				GetLegacySolverStorageAlignment() const { return 1; }
+	virtual void				InitializeLegacySolverStorage(void *) const { }
+	virtual void				DestroyLegacySolverStorage(void *) const { }
+	/// Source's setup_and_step_constraint and step_constraint entry points. Native Jolt
+	/// constraints retain the existing virtual solve through these defaults.
+	virtual bool				SetupAndSolveLegacyVelocityConstraint(void *, float inDeltaTime, float inTauFactor, float inDampingFactor)
+	{
+		SetupVelocityConstraint(inDeltaTime);
+		SetLegacySolveFactors(inTauFactor, inDampingFactor);
+		return SolveVelocityConstraint(inDeltaTime);
+	}
+	virtual bool				StepLegacyVelocityConstraint(void *, float inDeltaTime, float inTauFactor, float inDampingFactor)
+	{
+		SetLegacySolveFactors(inTauFactor, inDampingFactor);
+		return SolveVelocityConstraint(inDeltaTime);
+	}
 	///@}
 
 	/// Link bodies that are connected by this constraint in the island builder
@@ -315,6 +335,8 @@ public:
 
 private:
 	std::vector<Constraint *>		mConstraints;
+	std::vector<size_t>			mSolverStorageOffsets;
+	std::vector<std::max_align_t>	mSolverStorage;
 	std::atomic<bool>			mSolvePending{ false };
 	int							mAdditionalIterations = 0;
 	bool						mRollbackOnBreak = false;
