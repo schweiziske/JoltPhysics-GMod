@@ -50,6 +50,12 @@ public:
 	bool					mVPhysicsImpactingContact = false;	///< Adapter semantic: contact enters IVP's impact distance during this update.
 	bool					mVPhysicsUseLegacySolver = false;	///< Adapter semantic: solve the owning island with the IVP event-time contact path.
 	bool					mVPhysicsDisablePenetrationRecovery = false; ///< Adapter semantic: keep velocity blocking but suppress rescue / split-position depenetration for this pair.
+	bool					mVPhysicsSevereInterpenetration = false; ///< Adapter semantic: route a failed deep-overlap mindist through IVP's bounded anomaly rescue.
+	bool					mVPhysicsCCDContact = false;		///< Adapter semantic: settings are being calculated for the continuous-collision pass.
+	bool					mVPhysicsDeferPlayerSupportContact = false; ///< Adapter semantic: suppress physical response for this newly touching player support until the next update.
+	bool					mVPhysicsPlayerSupportStartupContact = false; ///< Adapter semantic: exact-touch player support that has not established friction yet.
+	float					mVPhysicsPlayerSupportStartupPenetration = -1.0f; ///< Adapter semantic: first real penetration of an exact-touch support mindist, in physics units.
+	float					mVPhysicsPlayerSupportStartupRescuePenetration = -1.0f; ///< Adapter semantic: transient per-update rescue depth; never persisted to the manifold cache.
 	Vec3					mRelativeLinearSurfaceVelocity = Vec3::sZero(); ///< Relative linear surface velocity between the bodies (world space surface velocity of body 2 - world space surface velocity of body 1), can be used to create a conveyor belt effect
 	Vec3					mRelativeAngularSurfaceVelocity = Vec3::sZero(); ///< Relative angular surface velocity between the bodies (world space angular surface velocity of body 2 - world space angular surface velocity of body 1). Note that this angular velocity is relative to the center of mass of body 1, so if you want it relative to body 2's center of mass you need to add body 2 angular velocity x (body 1 world space center of mass - body 2 world space center of mass) to mRelativeLinearSurfaceVelocity.
 };

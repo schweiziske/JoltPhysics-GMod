@@ -1374,7 +1374,8 @@ void PhysicsSystem::JobFinalizeIslands(PhysicsUpdateContext *ioContext)
 
 	// Prepare the large island splitter
 	if (mPhysicsSettings.mUseLargeIslandSplitter)
-		mLargeIslandSplitter.Prepare(mIslandBuilder, mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), ioContext->mTempAllocator);
+		mLargeIslandSplitter.Prepare(mIslandBuilder, mContactManager,
+			mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), ioContext->mTempAllocator);
 }
 
 void PhysicsSystem::JobBodySetIslandIndex()

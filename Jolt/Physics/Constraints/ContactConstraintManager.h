@@ -232,6 +232,7 @@ public:
 	/// True when any contact in this range is predicted to enter IVP's impact distance this update.
 	bool						AreAnyContactsImpacting(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
 	bool						AreAnyContactsUsingVPhysicsSolver(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
+	bool						AreAnyContactIndicesUsingVPhysicsSolver(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const;
 
 	/// Save back the lambdas to the contact cache for the next warm start
 	void						StoreAppliedImpulses(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
@@ -335,7 +336,9 @@ private:
 		enum class EFlags : uint16
 		{
 			ContactPersisted	= 1,																///< If this cache entry was reused in the next simulation update
-			CCDContact			= 2																	///< This is a cached manifold reported by continuous collision detection and was only used to create a contact callback
+			CCDContact			= 2,																///< This is a cached manifold reported by continuous collision detection and was only used to create a contact callback
+			VPhysicsDeferPlayerSupport = 4,													///< Preserve a discrete-pass player-support deferral through the CCD pass of the same update
+			VPhysicsPlayerSupportStartup = 8												///< Preserve exact-touch player support until it establishes friction
 		};
 
 		/// @see EFlags
@@ -344,11 +347,14 @@ private:
 		/// Number of contact points in the array below
 		uint16					mNumContactPoints;
 
+		/// First real penetration of an exact-touch player support startup manifold.
+		float					mVPhysicsPlayerSupportStartupPenetration = -1.0f;
+
 		/// Contact points that this manifold consists of
 		CachedContactPoint		mContactPoints[1];
 	};
 
-	static_assert(sizeof(CachedManifold) == 76, "This structure is expect to not contain any waste due to alignment");
+	static_assert(sizeof(CachedManifold) == 80, "This structure is expect to not contain any waste due to alignment");
 	static_assert(alignof(CachedManifold) == 4, "Assuming 4 byte aligned");
 
 	/// Define a map that maps SubShapeIDPair -> manifold
@@ -500,11 +506,18 @@ private:
 		float					mInvInertiaScale1;
 		float					mInvMass2;
 		float					mInvInertiaScale2;
+		float					mPlayerSupportStartupInitialNormalVelocity1 = 0.0f;
+		float					mPlayerSupportStartupInitialNormalVelocity2 = 0.0f;
+		float					mPlayerSupportStartupDeltaTime = 0.0f;
+		float					mPlayerSupportStartupPenetration = -1.0f;
 		uint32					mNumContactPoints;
 		bool					mContactImpacting = false;
 		bool					mContactHasCachedSupport = false;
 		bool					mUseVPhysicsSolver = false;
 		bool					mDisablePenetrationRecovery = false;
+		bool					mSevereInterpenetration = false;
+		bool					mPlayerSupportStartup = false;
+		bool					mPlayerSupportStartupCorrectionQueued = false;
 	};
 
 	/// Contact constraint class, used for solving penetrations
@@ -563,7 +576,7 @@ private:
 	static bool					sSolveVelocityConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2);
 
 	template <EMotionType Type1, EMotionType Type2>
-	static bool					sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget);
+	static bool					sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget, float inInterpenetrationRescueSpeed, uint32 &ioRemainingSystemImpacts);
 
 	template <bool SolveFriction, bool SolveNonPenetration, bool PersistentOnly>
 	bool						TemplatedSolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);

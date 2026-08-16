@@ -68,6 +68,7 @@ JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::Calcu
 		relative_velocity = Vec3::sZero();
 	}
 	float normal_velocity = relative_velocity.Dot(inWorldSpaceNormal);
+	const float contact_gap = Vec3(inWorldSpacePosition2 - inWorldSpacePosition1).Dot(inWorldSpaceNormal);
 
 	// IVP distinguishes a pending mindist from an established friction contact. A point without
 	// cached support may live in the broad contact range, but it only constrains motion against the
@@ -161,16 +162,33 @@ JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::Calcu
 	// split-position correction. A zero cached normal lambda means this point has not supported an
 	// active contact yet; this also lets a speculative manifold wait until it crosses the inner
 	// collision tolerance before consuming its one impact rescue.
-	if (!disable_penetration_recovery && inAllowContactRescue && normal_velocity < 0.0f
+	const bool player_support_panic_rescue = inSettings.mVPhysicsPlayerSupportStartupContact
+		&& contact_gap < 0.0f && normal_velocity >= 0.0f;
+	if (!disable_penetration_recovery && inAllowContactRescue
+		&& (normal_velocity < 0.0f || player_support_panic_rescue)
 		&& inContactRescueVelocityFactor > 0.0f && inContactSeparationTarget > 0.0f && inDeltaTime > 0.0f)
 	{
-		float gap = Vec3(inWorldSpacePosition2 - inWorldSpacePosition1).Dot(inWorldSpaceNormal);
-		float collision_tolerance = 0.5f * inContactSeparationTarget;
-		if (gap <= collision_tolerance)
+		// An exact-touch player support manifold has already consumed IVP's inner
+		// collision-distance lead-in. During startup, charge rescue only for real
+		// penetration below geometric contact instead of adding the full tolerance again.
+		float collision_tolerance = inSettings.mVPhysicsPlayerSupportStartupContact
+			? 0.0f : 0.5f * inContactSeparationTarget;
+		if (contact_gap <= collision_tolerance)
 		{
-			float rescue_addon = 2.0f * max(0.0f, collision_tolerance - gap) / inDeltaTime;
+			const float startup_rescue_penetration =
+				inSettings.mVPhysicsPlayerSupportStartupRescuePenetration >= 0.0f
+					? inSettings.mVPhysicsPlayerSupportStartupRescuePenetration
+					: inSettings.mVPhysicsPlayerSupportStartupPenetration;
+			const float rescue_penetration = inSettings.mVPhysicsPlayerSupportStartupContact
+				&& startup_rescue_penetration >= 0.0f
+				? startup_rescue_penetration
+				: max(0.0f, collision_tolerance - contact_gap);
+			float rescue_addon = 2.0f * rescue_penetration / inDeltaTime;
 			float rescue_velocity = inContactRescueVelocityFactor * (inContactSeparationTarget + rescue_addon);
-			normal_velocity_bias = min(normal_velocity_bias, -rescue_velocity);
+			normal_velocity_bias = min(normal_velocity_bias,
+				player_support_panic_rescue
+					? -(normal_velocity + rescue_velocity)
+					: -rescue_velocity);
 		}
 	}
 
@@ -277,11 +295,13 @@ void ContactConstraintManager::CachedContactPoint::RestoreState(StateRecorder &i
 void ContactConstraintManager::CachedManifold::SaveState(StateRecorder &inStream) const
 {
 	inStream.Write(mContactNormal);
+	inStream.Write(mVPhysicsPlayerSupportStartupPenetration);
 }
 
 void ContactConstraintManager::CachedManifold::RestoreState(StateRecorder &inStream)
 {
 	inStream.Read(mContactNormal);
+	inStream.Read(mVPhysicsPlayerSupportStartupPenetration);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -834,6 +854,20 @@ JPH_INLINE ContactConstraintManager::ContactConstraint<Type1, Type2> *ContactCon
 	constraint->mNumContactPoints = inNumContactPoints;
 	constraint->mUseVPhysicsSolver = inSettings.mVPhysicsUseLegacySolver;
 	constraint->mDisablePenetrationRecovery = inSettings.mVPhysicsDisablePenetrationRecovery;
+	constraint->mSevereInterpenetration = inSettings.mVPhysicsSevereInterpenetration;
+	constraint->mPlayerSupportStartup = inSettings.mVPhysicsPlayerSupportStartupContact;
+	constraint->mPlayerSupportStartupPenetration =
+		inSettings.mVPhysicsPlayerSupportStartupRescuePenetration >= 0.0f
+			? inSettings.mVPhysicsPlayerSupportStartupRescuePenetration
+			: inSettings.mVPhysicsPlayerSupportStartupPenetration;
+	if (constraint->mPlayerSupportStartup)
+	{
+		constraint->mPlayerSupportStartupInitialNormalVelocity1 = inBody1.IsDynamic()
+			? inBody1.GetLinearVelocity().Dot(inWorldSpaceNormal) : 0.0f;
+		constraint->mPlayerSupportStartupInitialNormalVelocity2 = inBody2.IsDynamic()
+			? inBody2.GetLinearVelocity().Dot(inWorldSpaceNormal) : 0.0f;
+		constraint->mPlayerSupportStartupDeltaTime = mUpdateContext->mStepDeltaTime;
+	}
 
 #ifdef JPH_TRACK_SIMULATION_STATS
 	// Track new contact constraints
@@ -881,6 +915,19 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 			break; // Out of cache space
 		CachedManifold *output_cm = &output_kv->GetValue();
 		memcpy(output_cm, &input_cm, CachedManifold::sGetRequiredTotalSize(input_cm.mNumContactPoints));
+		// This flag only bridges the discrete and CCD passes of one update. A manifold copied
+		// from the previous update must become ordinary support again.
+		output_cm->mFlags.fetch_and(
+			(uint16)~(uint16)CachedManifold::EFlags::VPhysicsDeferPlayerSupport,
+			memory_order_relaxed);
+		for (uint32 point_index = 0; point_index < output_cm->mNumContactPoints; ++point_index)
+			if (output_cm->mContactPoints[point_index].mVPhysicsContactEstablished)
+			{
+				output_cm->mFlags.fetch_and(
+					(uint16)~(uint16)CachedManifold::EFlags::VPhysicsPlayerSupportStartup,
+					memory_order_relaxed);
+				break;
+			}
 
 		// Link the object under the body pairs
 		output_cm->mNextWithSameBodyPair = output_handle;
@@ -891,6 +938,11 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 		settings.mCombinedFriction = mCombineFriction(inBody1, input_key.GetSubShapeID1(), inBody2, input_key.GetSubShapeID2());
 		settings.mCombinedRestitution = mCombineRestitution(inBody1, input_key.GetSubShapeID1(), inBody2, input_key.GetSubShapeID2());
 		settings.mIsSensor = inBody1.IsSensor() || inBody2.IsSensor();
+		settings.mVPhysicsPlayerSupportStartupContact =
+			(output_cm->mFlags.load(memory_order_relaxed)
+				& (uint16)CachedManifold::EFlags::VPhysicsPlayerSupportStartup) != 0;
+		settings.mVPhysicsPlayerSupportStartupPenetration =
+			output_cm->mVPhysicsPlayerSupportStartupPenetration;
 
 		// Calculate world space contact normal
 		Vec3 world_space_normal = transform_body2.Multiply3x3(Vec3::sLoadFloat3Unsafe(output_cm->mContactNormal)).Normalized();
@@ -916,6 +968,23 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 				penetration_depth = max(penetration_depth, (manifold.mRelativeContactPointsOn1[i] - manifold.mRelativeContactPointsOn2[i]).Dot(world_space_normal));
 			}
 			manifold.mPenetrationDepth = penetration_depth; // We don't have the penetration depth anymore, estimate it
+			if (settings.mVPhysicsPlayerSupportStartupContact
+				&& settings.mVPhysicsPlayerSupportStartupPenetration < 0.0f)
+			{
+				settings.mVPhysicsPlayerSupportStartupPenetration = max(0.0f, penetration_depth);
+				output_cm->mVPhysicsPlayerSupportStartupPenetration =
+					settings.mVPhysicsPlayerSupportStartupPenetration;
+			}
+			else if (settings.mVPhysicsPlayerSupportStartupContact
+				&& std::getenv("VJOLT_TEST_PLAYER_SUPPORT_SPREAD_PENETRATION") != nullptr)
+			{
+				const float live_penetration = max(0.0f, penetration_depth);
+				const float remaining_feature_count = max(1.0f, float(output_cm->mNumContactPoints - 1));
+				settings.mVPhysicsPlayerSupportStartupRescuePenetration =
+					settings.mVPhysicsPlayerSupportStartupPenetration + max(0.0f,
+					live_penetration - settings.mVPhysicsPlayerSupportStartupPenetration)
+					/ remaining_feature_count;
+			}
 
 			// Notify callback
 			mContactListener->OnContactPersisted(inBody1, inBody2, manifold, settings);
@@ -988,10 +1057,19 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 					|| ccp.mVPhysicsFrictionNormalLambda > 0.0f;
 				const bool has_established_contact = has_cached_support
 					|| ccp.mVPhysicsContactEstablished;
+				if (std::getenv("VJOLT_TRACE_PLAYER_SUPPORT_CACHE_ACTIVE") != nullptr)
+					std::fprintf(stderr,
+						"PLAYER_SUPPORT_CACHE cached b1=%u b2=%u point=%u lambda=%.9g legacy=%.9g established=%d startup=%d impacting=%d\n",
+						inBody1.GetID().GetIndexAndSequenceNumber(), inBody2.GetID().GetIndexAndSequenceNumber(),
+						i, wcp.mNonPenetrationConstraint.GetTotalLambda(), ccp.mVPhysicsFrictionNormalLambda,
+						int(ccp.mVPhysicsContactEstablished), int(settings.mVPhysicsPlayerSupportStartupContact),
+						int(settings.mVPhysicsImpactingContact));
 				constraint->mContactHasCachedSupport |= has_cached_support;
 				bool allow_contact_rescue = !has_established_contact;
-				const bool fresh_impact = settings.mVPhysicsImpactingContact
-					&& !has_established_contact;
+				const bool fresh_impact = settings.mVPhysicsSevereInterpenetration
+					|| (settings.mVPhysicsImpactingContact
+						&& !settings.mVPhysicsDeferPlayerSupportContact
+						&& !has_established_contact);
 				constraint->mContactImpacting |= fresh_impact;
 				// A pending speculative manifold can persist for several updates before it actually
 				// crosses IVP's inner impact distance. That first supported update still gets the one
@@ -1168,6 +1246,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 	if (new_manifold_kv == nullptr)
 		return; // Out of cache space
 	CachedManifold *new_manifold = &new_manifold_kv->GetValue();
+	new_manifold->mVPhysicsPlayerSupportStartupPenetration = -1.0f;
 
 	// Transform the world space normal to the space of body 2 (this is usually the static body)
 	RMat44 inverse_transform_body2 = inBody2.GetInverseCenterOfMassTransform();
@@ -1188,6 +1267,36 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 	const CachedContactPoint *ccp_end;
 	if (old_manifold_kv != nullptr)
 	{
+		const CachedManifold &old_cached_manifold = old_manifold_kv->GetValue();
+		settings.mVPhysicsPlayerSupportStartupContact =
+			(old_cached_manifold.mFlags.load(memory_order_relaxed)
+				& (uint16)CachedManifold::EFlags::VPhysicsPlayerSupportStartup) != 0;
+		settings.mVPhysicsPlayerSupportStartupPenetration =
+			old_cached_manifold.mVPhysicsPlayerSupportStartupPenetration;
+		for (uint32 point_index = 0;
+			settings.mVPhysicsPlayerSupportStartupContact
+				&& point_index < old_cached_manifold.mNumContactPoints;
+			++point_index)
+		{
+			if (old_cached_manifold.mContactPoints[point_index].mVPhysicsContactEstablished)
+				settings.mVPhysicsPlayerSupportStartupContact = false;
+		}
+		if (settings.mVPhysicsPlayerSupportStartupContact
+			&& settings.mVPhysicsPlayerSupportStartupPenetration < 0.0f)
+		{
+			settings.mVPhysicsPlayerSupportStartupPenetration =
+				max(0.0f, inManifold.mPenetrationDepth);
+		}
+		else if (settings.mVPhysicsPlayerSupportStartupContact
+			&& std::getenv("VJOLT_TEST_PLAYER_SUPPORT_SPREAD_PENETRATION") != nullptr)
+		{
+			const float live_penetration = max(0.0f, inManifold.mPenetrationDepth);
+			const float remaining_feature_count = max(1.0f, float(inManifold.mRelativeContactPointsOn1.size() - 1));
+			settings.mVPhysicsPlayerSupportStartupRescuePenetration =
+				settings.mVPhysicsPlayerSupportStartupPenetration + max(0.0f,
+				live_penetration - settings.mVPhysicsPlayerSupportStartupPenetration)
+				/ remaining_feature_count;
+		}
 		// Call point persisted listener
 		if (mContactListener != nullptr)
 			mContactListener->OnContactPersisted(inBody1, inBody2, inManifold, settings);
@@ -1210,6 +1319,12 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 		ccp_start = nullptr;
 		ccp_end = nullptr;
 	}
+	if (settings.mVPhysicsDeferPlayerSupportContact)
+		new_manifold->mFlags |= (uint16)CachedManifold::EFlags::VPhysicsDeferPlayerSupport;
+	if (settings.mVPhysicsPlayerSupportStartupContact)
+		new_manifold->mFlags |= (uint16)CachedManifold::EFlags::VPhysicsPlayerSupportStartup;
+	new_manifold->mVPhysicsPlayerSupportStartupPenetration =
+		settings.mVPhysicsPlayerSupportStartupPenetration;
 
 	// Get inverse transform for body 1
 	RMat44 inverse_transform_body1 = inBody1.GetInverseCenterOfMassTransform();
@@ -1362,10 +1477,19 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 				|| legacy_friction_normal_lambda > 0.0f;
 			const bool has_established_contact = has_cached_support
 				|| legacy_contact_established;
+			if (std::getenv("VJOLT_TRACE_PLAYER_SUPPORT_CACHE_ACTIVE") != nullptr)
+				std::fprintf(stderr,
+					"PLAYER_SUPPORT_CACHE added b1=%u b2=%u point=%d lambda=%.9g legacy=%.9g established=%d startup=%d impacting=%d\n",
+					inBody1.GetID().GetIndexAndSequenceNumber(), inBody2.GetID().GetIndexAndSequenceNumber(),
+					i, wcp.mNonPenetrationConstraint.GetTotalLambda(), legacy_friction_normal_lambda,
+					int(legacy_contact_established), int(settings.mVPhysicsPlayerSupportStartupContact),
+					int(settings.mVPhysicsImpactingContact));
 			constraint->mContactHasCachedSupport |= has_cached_support;
 			bool allow_contact_rescue = !has_established_contact;
-			const bool fresh_impact = settings.mVPhysicsImpactingContact
-				&& !has_established_contact;
+			const bool fresh_impact = settings.mVPhysicsSevereInterpenetration
+				|| (settings.mVPhysicsImpactingContact
+					&& !settings.mVPhysicsDeferPlayerSupportContact
+					&& !has_established_contact);
 			constraint->mContactImpacting |= fresh_impact;
 			bool allow_restitution = !mPhysicsSettings.mContactRestitutionOnlyOnNewContact
 				|| !contact_persisted || fresh_impact;
@@ -1469,6 +1593,9 @@ void ContactConstraintManager::OnCCDContactAdded(ContactAllocator &ioContactAllo
 	outSettings.mCombinedFriction = mCombineFriction(inBody1, inManifold.mSubShapeID1, inBody2, inManifold.mSubShapeID2);
 	outSettings.mCombinedRestitution = mCombineRestitution(inBody1, inManifold.mSubShapeID1, inBody2, inManifold.mSubShapeID2);
 	outSettings.mIsSensor = false; // For now, no sensors are supported during CCD
+	outSettings.mVPhysicsCCDContact = true;
+	outSettings.mVPhysicsDeferPlayerSupportContact = false;
+	outSettings.mVPhysicsPlayerSupportStartupContact = false;
 
 	// The remainder of this function only deals with calling contact callbacks, if there's no contact callback we also don't need to do this work
 	if (mContactListener != nullptr)
@@ -1498,6 +1625,22 @@ void ContactConstraintManager::OnCCDContactAdded(ContactAllocator &ioContactAllo
 		// Check if we already created this contact this physics update
 		ManifoldCache &write_cache = mCache[mCacheWriteIdx];
 		MKVAndCreated new_manifold_kv = write_cache.FindOrCreate(ioContactAllocator, key, key_hash, 0);
+		if (new_manifold_kv.first != nullptr)
+		{
+			const uint16 vphysics_flags =
+				new_manifold_kv.first->GetValue().mFlags.load(memory_order_relaxed);
+			if ((vphysics_flags & (uint16)CachedManifold::EFlags::VPhysicsDeferPlayerSupport) != 0)
+			{
+				// LinearCast can report the same pair again after the discrete pass. Carry the
+				// one-PSI Source player-support deferral into CCD so it cannot reintroduce the
+				// response that the discrete manifold deliberately suppressed.
+				outSettings.mVPhysicsDeferPlayerSupportContact = true;
+			}
+			outSettings.mVPhysicsPlayerSupportStartupContact =
+				(vphysics_flags & (uint16)CachedManifold::EFlags::VPhysicsPlayerSupportStartup) != 0;
+			outSettings.mVPhysicsPlayerSupportStartupPenetration =
+				new_manifold_kv.first->GetValue().mVPhysicsPlayerSupportStartupPenetration;
+		}
 		if (new_manifold_kv.second)
 		{
 			// This contact is new for this physics update, check if previous update we already had this contact.
@@ -1524,6 +1667,12 @@ void ContactConstraintManager::OnCCDContactAdded(ContactAllocator &ioContactAllo
 				CachedManifold &new_manifold = new_manifold_kv.first->GetValue();
 				new_manifold.mContactNormal = { 0, 0, 0 };
 				new_manifold.mFlags |= (uint16)CachedManifold::EFlags::CCDContact;
+				if (outSettings.mVPhysicsDeferPlayerSupportContact)
+					new_manifold.mFlags |= (uint16)CachedManifold::EFlags::VPhysicsDeferPlayerSupport;
+				if (outSettings.mVPhysicsPlayerSupportStartupContact)
+					new_manifold.mFlags |= (uint16)CachedManifold::EFlags::VPhysicsPlayerSupportStartup;
+				new_manifold.mVPhysicsPlayerSupportStartupPenetration =
+					outSettings.mVPhysicsPlayerSupportStartupPenetration;
 			}
 		}
 		else
@@ -1897,7 +2046,7 @@ bool ContactConstraintManager::sSolveVelocityConstraint(ContactConstraintBase &i
 }
 
 template <EMotionType Type1, EMotionType Type2>
-bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget)
+bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget, float inInterpenetrationRescueSpeed, uint32 &ioRemainingSystemImpacts)
 {
 	ContactConstraint<Type1, Type2> &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
 	const bool trace_impact = std::getenv("VJOLT_TRACE_VPHYSICS_IMPACT") != nullptr;
@@ -1920,6 +2069,47 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 	sGetVelocities<Type1, Type2>(ioMotionProperties1, ioMotionProperties2,
 		linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2);
 
+	if (constraint.mSevereInterpenetration)
+	{
+		// IVP_Anomaly_Manager::solve_inter_penetration_simple applies one bounded
+		// asynchronous speed change per body along the line between their cores.
+		// Crucially, it does not turn penetration depth into a velocity and does not
+		// repeat the full rescue for every point in the contact manifold.
+		const Vec3 rescue_direction = Vec3(
+			constraint.mBody2->GetCenterOfMassPosition()
+			- constraint.mBody1->GetCenterOfMassPosition()).NormalizedOr(Vec3::sAxisX());
+		// The rescue is one pair impulse, not an equal velocity assignment. Applying
+		// the same speed to both bodies makes a 1 kg prop kick an 85 kg player as hard
+		// as the prop itself, while IVP conserves pair momentum and lets the light body
+		// take nearly all of the separation velocity.
+		const float inverse_mass_sum = constraint.mInvMass1 + constraint.mInvMass2;
+		const uint32 dynamic_body_count =
+			(Type1 == EMotionType::Dynamic ? 1u : 0u)
+			+ (Type2 == EMotionType::Dynamic ? 1u : 0u);
+		const float relative_speed_change =
+			float(dynamic_body_count) * inInterpenetrationRescueSpeed;
+		const float rescue_impulse = inverse_mass_sum > 0.0f
+			? relative_speed_change / inverse_mass_sum : 0.0f;
+		bool applied = rescue_impulse > 0.0f;
+		if constexpr (Type1 == EMotionType::Dynamic)
+			linear_velocity1 -= rescue_direction
+				* (constraint.mInvMass1 * rescue_impulse);
+		if constexpr (Type2 == EMotionType::Dynamic)
+			linear_velocity2 += rescue_direction
+				* (constraint.mInvMass2 * rescue_impulse);
+		if (applied)
+			sSetVelocities<Type1, Type2>(ioMotionProperties1, ioMotionProperties2,
+				linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2);
+		if (trace_impact)
+			std::fprintf(stderr,
+				"VPHYSICS_INTERPENETRATION_RESCUE b1=%u b2=%u dir=(%.9g,%.9g,%.9g) speed=%.9g impulse=%.9g\n",
+				constraint.mBody1->GetID().GetIndexAndSequenceNumber(),
+				constraint.mBody2->GetID().GetIndexAndSequenceNumber(),
+				rescue_direction.GetX(), rescue_direction.GetY(), rescue_direction.GetZ(),
+				relative_speed_change, rescue_impulse);
+		return applied;
+	}
+
 	const RMat44 transform1 = constraint.mBody1->GetCenterOfMassTransform();
 	const RMat44 transform2 = constraint.mBody2->GetCenterOfMassTransform();
 	const Vec3 normal = constraint.GetWorldSpaceNormal();
@@ -1934,7 +2124,7 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 	const float friction_cos = 1.0f / Sqrt(1.0f + Square(impact_friction));
 	const float friction_sin = friction_cos * impact_friction;
 	constexpr float cImpactEpsilon = 1.0e-4f;
-	constexpr uint32 cMaximumSystemImpactCount = 5000;
+	constexpr uint32 cMaximumImpactsPerManifoldPoint = 32;
 	const float collision_tolerance = 0.5f * inContactSeparationTarget;
 	const Vec3 velocity_before_impact1 = linear_velocity1;
 	const Vec3 angular_velocity_before_impact1 = angular_velocity1;
@@ -2283,7 +2473,10 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 	// The narrow-phase event itself is the first impact. Subsequent selections are the IVP impact
 	// system and therefore use a per-mindist repeat count starting at one.
 	solve_impact_point(initial_impact_point, 0);
-	for (uint32 system_impact_count = 0; system_impact_count < cMaximumSystemImpactCount; ++system_impact_count)
+	const uint32 manifold_impact_budget = min(ioRemainingSystemImpacts,
+		cMaximumImpactsPerManifoldPoint * max(1u, constraint.mNumContactPoints));
+	uint32 consumed_system_impacts = 0;
+	while (consumed_system_impacts < manifold_impact_budget)
 	{
 		uint32 worst_point = MaxContactPoints;
 		float smallest_predicted_distance = collision_tolerance;
@@ -2305,14 +2498,23 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 		if (worst_point == MaxContactPoints)
 			break;
 		++impacts_while_system[worst_point];
+		++consumed_system_impacts;
 		if (trace_impact)
 			std::fprintf(stderr,
 				"VPHYSICS_IMPACT_SELECT iteration=%u point=%u predicted=%.9g count=%u\n",
-				system_impact_count, worst_point, smallest_predicted_distance,
+				consumed_system_impacts - 1, worst_point, smallest_predicted_distance,
 				impacts_while_system[worst_point]);
 		if (!solve_impact_point(worst_point, impacts_while_system[worst_point]))
 			break;
 	}
+	ioRemainingSystemImpacts -= consumed_system_impacts;
+	if (trace_impact && consumed_system_impacts == manifold_impact_budget
+		&& manifold_impact_budget > 0)
+		std::fprintf(stderr,
+			"VPHYSICS_IMPACT_BUDGET b1=%u b2=%u consumed=%u remaining=%u points=%u\n",
+			constraint.mBody1->GetID().GetIndexAndSequenceNumber(),
+			constraint.mBody2->GetID().GetIndexAndSequenceNumber(),
+			consumed_system_impacts, ioRemainingSystemImpacts, constraint.mNumContactPoints);
 
 	// Jolt's lambda sign is the impulse applied to body 2; IVP accumulated the opposite push on
 	// body 1. Publish the complete per-mindist sums only after the impact system has converged.
@@ -2607,7 +2809,7 @@ bool ContactConstraintManager::SolveFrictionConstraints(const uint32 *inConstrai
 
 bool ContactConstraintManager::SolveVPhysicsImpactConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inDeltaTime)
 {
-	using DispatchFunc = bool (*)(ContactConstraintBase &, MotionProperties *, MotionProperties *, float, float);
+	using DispatchFunc = bool (*)(ContactConstraintBase &, MotionProperties *, MotionProperties *, float, float, float, uint32 &);
 	static const DispatchFunc table[3][3] = {
 		{ nullptr, nullptr, sSolveVPhysicsImpactConstraint<EMotionType::Static, EMotionType::Dynamic> },
 		{ nullptr, nullptr, sSolveVPhysicsImpactConstraint<EMotionType::Kinematic, EMotionType::Dynamic> },
@@ -2619,6 +2821,12 @@ bool ContactConstraintManager::SolveVPhysicsImpactConstraints(const uint32 *inCo
 	};
 
 	bool any_impulse_applied = false;
+	// IVP's MAXIMUM_SYSTEM_PUSH_NUMBER is one budget for the complete friction impact
+	// system. The adapter previously gave every Jolt manifold its own 5000-push budget,
+	// turning a pasted constrained building into contacts * 5000 nested solves.
+	uint32 remaining_system_impacts = 5000;
+	const float interpenetration_rescue_speed = 2.0f
+		* mUpdateContext->mPhysicsSystem->GetGravity().Length() * inDeltaTime;
 	for (const uint32 *offset = inConstraintOffsetBegin; offset < inConstraintOffsetEnd; ++offset)
 	{
 		ContactConstraintBase &constraint = *reinterpret_cast<ContactConstraintBase *>(mConstraints + *offset);
@@ -2626,7 +2834,8 @@ bool ContactConstraintManager::SolveVPhysicsImpactConstraints(const uint32 *inCo
 		Body &body2 = *constraint.mBody2;
 		any_impulse_applied |= table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](
 			constraint, body1.GetMotionPropertiesUnchecked(), body2.GetMotionPropertiesUnchecked(),
-			inDeltaTime, mPhysicsSettings.mContactSeparationTarget);
+			inDeltaTime, mPhysicsSettings.mContactSeparationTarget,
+			interpenetration_rescue_speed, remaining_system_impacts);
 	}
 	return any_impulse_applied;
 }
@@ -2815,6 +3024,25 @@ bool ContactConstraintManager::AreAnyContactsUsingVPhysicsSolver(const uint32 *i
 	return false;
 }
 
+bool ContactConstraintManager::AreAnyContactIndicesUsingVPhysicsSolver(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const
+{
+	if (inConstraintIdxBegin >= inConstraintIdxEnd)
+		return false;
+
+	// IslandBuilder still stores contact indices when LargeIslandSplitter::Prepare runs.
+	// The per-island solve converts these entries to byte offsets later, immediately before
+	// sorting and solving. Inspect through the immutable index-to-offset table here so Prepare
+	// can count only islands that will actually call SplitIsland.
+	for (const uint32 *idx = inConstraintIdxBegin; idx < inConstraintIdxEnd; ++idx)
+	{
+		const uint32 offset = mConstraintIdxToOffset[*idx];
+		const ContactConstraintBase &constraint = *reinterpret_cast<const ContactConstraintBase *>(mConstraints + offset);
+		if (constraint.mUseVPhysicsSolver)
+			return true;
+	}
+	return false;
+}
+
 template <EMotionType Type1, EMotionType Type2>
 float ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioConstraint)
 {
@@ -2836,7 +3064,8 @@ float ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioC
 			wcp.mContactPoint->mFrictionLambda[0] = 0.0f;
 			wcp.mContactPoint->mFrictionLambda[1] = 0.0f;
 			wcp.mContactPoint->mVPhysicsFrictionNormalLambda = 0.0f;
-			wcp.mContactPoint->mVPhysicsContactEstablished = true;
+			wcp.mContactPoint->mVPhysicsContactEstablished =
+				!constraint.mPlayerSupportStartup;
 			Vec3::sZero().StoreFloat3(&wcp.mContactPoint->mVPhysicsFrictionDisplacement);
 		}
 		else
@@ -2849,6 +3078,31 @@ float ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioC
 				wcp.mContactPoint->mVPhysicsContactEstablished || point_normal_impulse > 0.0f;
 		}
 		normal_impulse += point_normal_impulse;
+	}
+	if (constraint.mPlayerSupportStartup && constraint.mContactImpacting
+		&& !constraint.mPlayerSupportStartupCorrectionQueued
+		&& constraint.mPlayerSupportStartupDeltaTime > 0.0f)
+	{
+		const Vec3 normal = constraint.GetWorldSpaceNormal();
+		if constexpr (Type1 == EMotionType::Dynamic)
+		{
+			MotionProperties *motion_properties1 = constraint.mBody1->GetMotionPropertiesUnchecked();
+			const float current_normal_velocity = motion_properties1->GetLinearVelocity().Dot(normal);
+			motion_properties1->AddVPhysicsIntegrationCorrection(
+				normal * ((constraint.mPlayerSupportStartupInitialNormalVelocity1
+					- current_normal_velocity) * constraint.mPlayerSupportStartupDeltaTime),
+				Vec3::sZero());
+		}
+		if constexpr (Type2 == EMotionType::Dynamic)
+		{
+			MotionProperties *motion_properties2 = constraint.mBody2->GetMotionPropertiesUnchecked();
+			const float current_normal_velocity = motion_properties2->GetLinearVelocity().Dot(normal);
+			motion_properties2->AddVPhysicsIntegrationCorrection(
+				normal * ((constraint.mPlayerSupportStartupInitialNormalVelocity2
+					- current_normal_velocity) * constraint.mPlayerSupportStartupDeltaTime),
+				Vec3::sZero());
+		}
+		constraint.mPlayerSupportStartupCorrectionQueued = true;
 	}
 	return normal_impulse;
 }
@@ -2902,7 +3156,8 @@ template <EMotionType Type1, EMotionType Type2>
 bool ContactConstraintManager::sSolvePositionConstraint(ContactConstraintBase &ioConstraint, Body &ioBody1, Body &ioBody2, const PhysicsSettings &inSettings)
 {
 	ContactConstraint<Type1, Type2> &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
-	if (constraint.mDisablePenetrationRecovery)
+	if (constraint.mDisablePenetrationRecovery
+		|| (constraint.mPlayerSupportStartup && constraint.mContactImpacting))
 		return false;
 
 	// Get transforms

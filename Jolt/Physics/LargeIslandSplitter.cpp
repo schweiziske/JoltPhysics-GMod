@@ -183,7 +183,7 @@ LargeIslandSplitter::~LargeIslandSplitter()
 	JPH_ASSERT(mSplitIslands == nullptr);
 }
 
-void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 inNumActiveBodies, TempAllocator *inTempAllocator)
+void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, const ContactConstraintManager &inContactManager, uint32 inNumActiveBodies, TempAllocator *inTempAllocator)
 {
 	JPH_PROFILE_FUNCTION();
 
@@ -205,8 +205,15 @@ void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 i
 		uint island_size = num_contacts_in_island + num_constraints_in_island;
 		if (island_size >= cLargeIslandTreshold)
 		{
-			mNumSplitIslands++;
-			mContactAndConstraintsSize += island_size;
+			// A VPhysics contact island deliberately uses the whole-island Source/IVP solve
+			// in JobSolveVelocityConstraints. Do not reserve a split slot for it: no later
+			// SplitIsland call will create that slot, and FetchNextBatch would otherwise wait
+			// forever for work that cannot appear on the second persistent-contact frame.
+			if (!inContactManager.AreAnyContactIndicesUsingVPhysicsSolver(contacts_start, contacts_end))
+			{
+				mNumSplitIslands++;
+				mContactAndConstraintsSize += island_size;
+			}
 		}
 		else
 			break; // If this island doesn't have enough constraints, the next islands won't either since they're sorted from big to small
@@ -231,10 +238,12 @@ void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, uint32 i
 		for (uint i = 0; i < mNumSplitIslands; ++i)
 			mSplitIslands[i].ResetStatus();
 	}
+
 }
 
 uint LargeIslandSplitter::AssignSplit(const Body *inBody1, const Body *inBody2)
 {
+	constexpr SplitMask non_parallel_mask = SplitMask(1U << cNonParallelSplitIdx);
 	uint32 idx1 = inBody1->GetIndexInActiveBodiesInternal();
 	uint32 idx2 = inBody2->GetIndexInActiveBodiesInternal();
 
@@ -244,6 +253,8 @@ uint LargeIslandSplitter::AssignSplit(const Body *inBody1, const Body *inBody2)
 		// Body 1 is not active or a kinematic body, so we only need to set 1 body
 		JPH_ASSERT(idx2 < mNumActiveBodies);
 		SplitMask &mask = mSplitMasks[idx2];
+		if ((mask & non_parallel_mask) != 0)
+			return cNonParallelSplitIdx;
 		uint split = min(CountTrailingZeros(~uint32(mask)), cNonParallelSplitIdx);
 		mask |= SplitMask(1U << split);
 		return split;
@@ -253,6 +264,8 @@ uint LargeIslandSplitter::AssignSplit(const Body *inBody1, const Body *inBody2)
 		// Body 2 is not active or a kinematic body, so we only need to set 1 body
 		JPH_ASSERT(idx1 < mNumActiveBodies);
 		SplitMask &mask = mSplitMasks[idx1];
+		if ((mask & non_parallel_mask) != 0)
+			return cNonParallelSplitIdx;
 		uint split = min(CountTrailingZeros(~uint32(mask)), cNonParallelSplitIdx);
 		mask |= SplitMask(1U << split);
 		return split;
@@ -264,6 +277,16 @@ uint LargeIslandSplitter::AssignSplit(const Body *inBody1, const Body *inBody2)
 		JPH_ASSERT(idx2 < mNumActiveBodies);
 		SplitMask &mask1 = mSplitMasks[idx1];
 		SplitMask &mask2 = mSplitMasks[idx2];
+		if (((mask1 | mask2) & non_parallel_mask) != 0)
+		{
+			// A Source local constraint system solves all of its members from one
+			// representative callback. Any later contact/constraint touching either
+			// body must join the single non-parallel batch as well; otherwise the
+			// group and a parallel batch can write the same body concurrently.
+			mask1 |= non_parallel_mask;
+			mask2 |= non_parallel_mask;
+			return cNonParallelSplitIdx;
+		}
 		uint split = min(CountTrailingZeros((~uint32(mask1)) & (~uint32(mask2))), cNonParallelSplitIdx);
 		SplitMask mask = SplitMask(1U << split);
 		mask1 |= mask;
@@ -321,7 +344,20 @@ bool LargeIslandSplitter::SplitIsland(uint32 inIslandIndex, const IslandBuilder 
 	uint32 *contact_split_idx = mContactAndConstraintsSplitIdx + offset;
 	uint32 *constraint_split_idx = contact_split_idx + num_contacts_in_island;
 
-	// Assign the contacts to a split
+	// Assign constraints first. LegacyConstraintGroup::BuildIslandSplits marks every
+	// member body as non-parallel; contacts must see that mark before they are colored.
+	uint32 *cur_constraint_split_idx = constraint_split_idx;
+	for (const uint32 *c = constraints_start; c < constraints_end; ++c)
+	{
+		const Constraint *constraint = inActiveConstraints[*c];
+		uint split = constraint->BuildIslandSplits(*this);
+		num_constraints_in_split[split]++;
+		*cur_constraint_split_idx++ = split;
+
+		ioStepsCalculator(constraint);
+	}
+
+	// Assign the contacts after all Source local constraint systems have reserved their bodies.
 	uint32 *cur_contact_split_idx = contact_split_idx;
 	for (const uint32 *c = contacts_start; c < contacts_end; ++c)
 	{
@@ -335,18 +371,6 @@ bool LargeIslandSplitter::SplitIsland(uint32 inIslandIndex, const IslandBuilder 
 			ioStepsCalculator(body1->GetMotionPropertiesUnchecked());
 		if (body2->IsDynamic())
 			ioStepsCalculator(body2->GetMotionPropertiesUnchecked());
-	}
-
-	// Assign the constraints to a split
-	uint32 *cur_constraint_split_idx = constraint_split_idx;
-	for (const uint32 *c = constraints_start; c < constraints_end; ++c)
-	{
-		const Constraint *constraint = inActiveConstraints[*c];
-		uint split = constraint->BuildIslandSplits(*this);
-		num_constraints_in_split[split]++;
-		*cur_constraint_split_idx++ = split;
-
-		ioStepsCalculator(constraint);
 	}
 
 	ioStepsCalculator.Finalize();
