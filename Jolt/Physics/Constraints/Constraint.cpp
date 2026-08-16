@@ -17,6 +17,24 @@
 
 JPH_NAMESPACE_BEGIN
 
+static bool IsLegacyGroupSolveTraceEnabled()
+{
+	static const bool enabled = []()
+	{
+#if defined(JPH_COMPILER_MSVC)
+		char *value = nullptr;
+		size_t length = 0;
+		const bool found = _dupenv_s(&value, &length, "VJOLT_TRACE_LEGACY_GROUP_SOLVES") == 0
+			&& value != nullptr;
+		std::free(value);
+		return found;
+#else
+		return std::getenv("VJOLT_TRACE_LEGACY_GROUP_SOLVES") != nullptr;
+#endif
+	}();
+	return enabled;
+}
+
 JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConstraintSettings)
 {
 	JPH_ADD_BASE_CLASS(ConstraintSettings, SerializableObject)
@@ -146,10 +164,43 @@ LegacyConstraintGroup::~LegacyConstraintGroup()
 		}
 }
 
+void LegacyConstraintGroup::RebuildSolverStorageLayout()
+{
+	// Havana keeps the total VMQ storage size on the local constraint system and only rebuilds it
+	// when members change. Do the same here instead of rediscovering sizes and alignments every PSI.
+	mSolverStorageOffsets.resize(mConstraints.size());
+	size_t storage_size = 0;
+	for (size_t index = 0; index < mConstraints.size(); ++index)
+	{
+		Constraint *constraint = mConstraints[index];
+		const size_t constraint_size = constraint->GetLegacySolverStorageSize();
+		if (constraint_size == 0)
+		{
+			mSolverStorageOffsets[index] = SIZE_MAX;
+			continue;
+		}
+
+		const size_t alignment = constraint->GetLegacySolverStorageAlignment();
+		JPH_ASSERT(alignment > 0 && alignment <= alignof(std::max_align_t)
+			&& (alignment & (alignment - 1)) == 0);
+		storage_size = (storage_size + alignment - 1) & ~(alignment - 1);
+		mSolverStorageOffsets[index] = storage_size;
+		storage_size += constraint_size;
+	}
+
+	const size_t storage_words = (storage_size + sizeof(std::max_align_t) - 1)
+		/ sizeof(std::max_align_t);
+	mSolverStorage.resize(storage_words);
+	mActiveSolverEntries.reserve(mConstraints.size());
+}
+
 void LegacyConstraintGroup::AddConstraint(Constraint *inConstraint)
 {
 	if (std::find(mConstraints.begin(), mConstraints.end(), inConstraint) == mConstraints.end())
+	{
 		mConstraints.push_back(inConstraint);
+		RebuildSolverStorageLayout();
+	}
 	inConstraint->SetLegacyConstraintGroup(this);
 }
 
@@ -157,7 +208,8 @@ void LegacyConstraintGroup::RemoveConstraint(Constraint *inConstraint)
 {
 	if (inConstraint->GetLegacyConstraintGroup() == this)
 		inConstraint->SetLegacyConstraintGroup(nullptr);
-	std::erase(mConstraints, inConstraint);
+	if (std::erase(mConstraints, inConstraint) != 0)
+		RebuildSolverStorageLayout();
 }
 
 bool LegacyConstraintGroup::IsSolverRepresentative(const Constraint *inCaller) const
@@ -192,65 +244,55 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 
 	bool appliedImpulse = false;
 	bool groupBroken = false;
-	// Havana's local constraint system allocates one sequential VMQ work buffer per controller
-	// invocation and stores only offsets for the reverse/forward scans. Reuse group-owned storage
-	// so steady-state simulation performs no allocation while retaining that cache-friendly layout.
-	mSolverStorageOffsets.resize(mConstraints.size());
-	size_t storage_size = 0;
+	// RebuildSolverStorageLayout has already packed every Havana work area contiguously. The
+	// backing vector only changes when group membership changes, so the steady-state PSI path does
+	// not allocate, resize or query virtual storage sizes.
+	std::byte *storage_base = reinterpret_cast<std::byte *>(mSolverStorage.data());
+	mActiveSolverEntries.clear();
 	for (size_t index = 0; index < mConstraints.size(); ++index)
 	{
 		Constraint *constraint = mConstraints[index];
 		if (!constraint->IsActive())
-		{
-			mSolverStorageOffsets[index] = SIZE_MAX;
 			continue;
-		}
-		const size_t alignment = constraint->GetLegacySolverStorageAlignment();
-		JPH_ASSERT(alignment > 0 && alignment <= alignof(std::max_align_t)
-			&& (alignment & (alignment - 1)) == 0);
-		storage_size = (storage_size + alignment - 1) & ~(alignment - 1);
-		mSolverStorageOffsets[index] = storage_size;
-		storage_size += constraint->GetLegacySolverStorageSize();
+		const size_t storage_offset = mSolverStorageOffsets[index];
+		void *solver_storage = storage_offset == SIZE_MAX? nullptr : storage_base + storage_offset;
+		mActiveSolverEntries.push_back({ constraint, solver_storage, index });
+		if (solver_storage != nullptr)
+			constraint->InitializeLegacySolverStorage(solver_storage);
 	}
-	const size_t storage_words = (storage_size + sizeof(std::max_align_t) - 1)
-		/ sizeof(std::max_align_t);
-	mSolverStorage.resize(storage_words);
-	std::byte *storage_base = reinterpret_cast<std::byte *>(mSolverStorage.data());
-	for (size_t index = 0; index < mConstraints.size(); ++index)
-		if (mSolverStorageOffsets[index] != SIZE_MAX)
-			mConstraints[index]->InitializeLegacySolverStorage(
-				storage_base + mSolverStorageOffsets[index]);
 	auto destroy_solver_storage = [&]()
 	{
-		for (size_t index = 0; index < mConstraints.size(); ++index)
-			if (mSolverStorageOffsets[index] != SIZE_MAX)
-				mConstraints[index]->DestroyLegacySolverStorage(
-					storage_base + mSolverStorageOffsets[index]);
+		for (const SolverEntry &entry : mActiveSolverEntries)
+			if (entry.mStorage != nullptr)
+				entry.mConstraint->DestroyLegacySolverStorage(entry.mStorage);
 	};
-	const bool traceGroupSolves = std::getenv("VJOLT_TRACE_LEGACY_GROUP_SOLVES") != nullptr;
+	const bool traceGroupSolves = IsLegacyGroupSolveTraceEnabled();
 	uint32 solveOrdinal = 0;
 	if (traceGroupSolves)
 		std::fprintf(stderr, "LEGACY_GROUP_BEGIN group=%p count=%zu additional=%d caller=%p\n",
 			static_cast<void *>(this), mConstraints.size(), mAdditionalIterations,
 			static_cast<void *>(inCaller));
-	auto solveConstraint = [&](Constraint *constraint, float tauFactor, float dampingFactor,
-		const char *phase, int64 iteration, size_t constraintIndex, bool setup)
+	auto solveConstraint = [&](const SolverEntry &entry, float tauFactor, float dampingFactor,
+		const char *phase, int64 iteration, bool setup)
 	{
 		if (groupBroken)
 			return;
 		++solveOrdinal;
-		const TwoBodyConstraint *two_body = constraint->GetType() == EConstraintType::TwoBodyConstraint?
-			static_cast<const TwoBodyConstraint *>(constraint) : nullptr;
+		Constraint *constraint = entry.mConstraint;
+		const bool check_break = constraint->HasLegacyBreakLimits();
+		const bool capture_body_state = traceGroupSolves || check_break;
+		const TwoBodyConstraint *two_body = capture_body_state
+			&& constraint->GetType() == EConstraintType::TwoBodyConstraint?
+				static_cast<const TwoBodyConstraint *>(constraint) : nullptr;
 		const Vec3 linear1 = two_body? two_body->GetBody1()->GetLinearVelocity() : Vec3::sZero();
 		const Vec3 angular1 = two_body? two_body->GetBody1()->GetAngularVelocity() : Vec3::sZero();
 		const Vec3 linear2 = two_body? two_body->GetBody2()->GetLinearVelocity() : Vec3::sZero();
 		const Vec3 angular2 = two_body? two_body->GetBody2()->GetAngularVelocity() : Vec3::sZero();
-		void *solver_storage = storage_base + mSolverStorageOffsets[constraintIndex];
 		appliedImpulse |= setup
 			? constraint->SetupAndSolveLegacyVelocityConstraint(
-				solver_storage, inDeltaTime, tauFactor, dampingFactor)
+				entry.mStorage, inDeltaTime, tauFactor, dampingFactor)
 			: constraint->StepLegacyVelocityConstraint(
-				solver_storage, inDeltaTime, tauFactor, dampingFactor);
+				entry.mStorage, inDeltaTime, tauFactor, dampingFactor);
 		if (traceGroupSolves && two_body)
 		{
 			const Vec3 postLinear1 = two_body->GetBody1()->GetLinearVelocity();
@@ -260,7 +302,7 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 			std::fprintf(stderr,
 				"LEGACY_GROUP_SOLVE group=%p ordinal=%u phase=%s iteration=%lld index=%zu subtype=%u b1=%u pre_v=(%.9g,%.9g,%.9g) pre_w=(%.9g,%.9g,%.9g) post_v=(%.9g,%.9g,%.9g) post_w=(%.9g,%.9g,%.9g) b2=%u pre_v=(%.9g,%.9g,%.9g) pre_w=(%.9g,%.9g,%.9g) post_v=(%.9g,%.9g,%.9g) post_w=(%.9g,%.9g,%.9g)\n",
 				static_cast<void *>(this), solveOrdinal, phase, static_cast<long long>(iteration),
-				constraintIndex, uint(constraint->GetSubType()),
+				entry.mConstraintIndex, uint(constraint->GetSubType()),
 				two_body->GetBody1()->GetID().GetIndexAndSequenceNumber(),
 				linear1.GetX(), linear1.GetY(), linear1.GetZ(), angular1.GetX(), angular1.GetY(), angular1.GetZ(),
 				postLinear1.GetX(), postLinear1.GetY(), postLinear1.GetZ(), postAngular1.GetX(), postAngular1.GetY(), postAngular1.GetZ(),
@@ -268,7 +310,8 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 				linear2.GetX(), linear2.GetY(), linear2.GetZ(), angular2.GetX(), angular2.GetY(), angular2.GetZ(),
 				postLinear2.GetX(), postLinear2.GetY(), postLinear2.GetZ(), postAngular2.GetX(), postAngular2.GetY(), postAngular2.GetZ());
 		}
-		if (constraint->CheckLegacyBreakAfterSolve(linear1, angular1, linear2, angular2, mRollbackOnBreak)
+		if (check_break && constraint->CheckLegacyBreakAfterSolve(
+			linear1, angular1, linear2, angular2, mRollbackOnBreak)
 			&& mRollbackOnBreak)
 		{
 			constraint->SetEnabled(false);
@@ -277,37 +320,24 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 	};
 	auto solveForward = [&](float tauFactor, float dampingFactor, int64 iteration)
 	{
-		for (size_t index = 0; index < mConstraints.size(); ++index)
-		{
-			Constraint *constraint = mConstraints[index];
-			if (constraint->IsActive())
-				solveConstraint(constraint, tauFactor, dampingFactor, "forward", iteration, index, false);
-		}
+		for (const SolverEntry &entry : mActiveSolverEntries)
+			solveConstraint(entry, tauFactor, dampingFactor, "forward", iteration, false);
 	};
 	auto solveReverse = [&](float tauFactor, float dampingFactor, int64 iteration)
 	{
-		for (size_t reverseIndex = mConstraints.size(); reverseIndex > 0; --reverseIndex)
-		{
-			const size_t index = reverseIndex - 1;
-			Constraint *constraint = mConstraints[index];
-			if (constraint->IsActive())
-				solveConstraint(constraint, tauFactor, dampingFactor, "reverse", iteration, index, false);
-		}
+		for (auto entry = mActiveSolverEntries.rbegin(); entry != mActiveSolverEntries.rend(); ++entry)
+			solveConstraint(*entry, tauFactor, dampingFactor, "reverse", iteration, false);
 	};
 	auto setupAndSolveForward = [&](float tauFactor, float dampingFactor)
 	{
 		// Havana's setup_and_step_constraint is interleaved per constraint. Do not set up the
 		// complete group first: a later predictive Length constraint must observe velocity impulses
 		// written by an earlier Ragdoll/Fixed setup solve in the same local controller pass.
-		for (size_t index = 0; index < mConstraints.size(); ++index)
+		for (const SolverEntry &entry : mActiveSolverEntries)
 		{
-			Constraint *constraint = mConstraints[index];
 			if (groupBroken)
 				break;
-			if (constraint->IsActive())
-			{
-				solveConstraint(constraint, tauFactor, dampingFactor, "setup", -1, index, true);
-			}
+			solveConstraint(entry, tauFactor, dampingFactor, "setup", -1, true);
 		}
 	};
 

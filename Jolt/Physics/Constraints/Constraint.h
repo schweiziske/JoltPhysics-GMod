@@ -334,9 +334,19 @@ public:
 	bool					SolveVelocityConstraints(Constraint *inCaller, float inDeltaTime);
 
 private:
+	struct SolverEntry
+	{
+		Constraint *				mConstraint;
+		void *					mStorage;
+		size_t					mConstraintIndex;
+	};
+
+	void						RebuildSolverStorageLayout();
+
 	std::vector<Constraint *>		mConstraints;
 	std::vector<size_t>			mSolverStorageOffsets;
 	std::vector<std::max_align_t>	mSolverStorage;
+	std::vector<SolverEntry>		mActiveSolverEntries;
 	std::atomic<bool>			mSolvePending{ false };
 	int							mAdditionalIterations = 0;
 	bool						mRollbackOnBreak = false;
