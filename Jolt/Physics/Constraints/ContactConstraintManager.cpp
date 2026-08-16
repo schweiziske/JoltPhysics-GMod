@@ -2046,7 +2046,7 @@ bool ContactConstraintManager::sSolveVelocityConstraint(ContactConstraintBase &i
 }
 
 template <EMotionType Type1, EMotionType Type2>
-bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget, float inInterpenetrationRescueSpeed, uint32 &ioRemainingSystemImpacts)
+bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget, float inInterpenetrationRescueSpeed, uint32 &ioRemainingSystemImpacts, VPhysicsSolverStats &ioStats)
 {
 	ContactConstraint<Type1, Type2> &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
 	const bool trace_impact = std::getenv("VJOLT_TRACE_VPHYSICS_IMPACT") != nullptr;
@@ -2272,6 +2272,8 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 	};
 	auto solve_impact_point = [&](uint32 inPointIndex, uint32 inImpactsWhileSystem)
 	{
+		++ioStats.mImpactCount;
+		++ioStats.mSystemImpactCount;
 		WorldContactPoint<Type1, Type2> &wcp = constraint.mContactPoints[inPointIndex];
 		const Vec3 &r1 = event_r1[inPointIndex];
 		const Vec3 &r2 = event_r2[inPointIndex];
@@ -2438,6 +2440,7 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 				< -(inContactSeparationTarget + rescue_speed_addon);
 			if (delay_selected_body)
 			{
+				++ioStats.mDelayedImpactCount;
 				if (delay_body1)
 				{
 					committed_linear_velocity2 = linear_velocity2;
@@ -2491,6 +2494,7 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 	{
 		uint32 worst_point = MaxContactPoints;
 		float smallest_predicted_distance = collision_tolerance;
+		ioStats.mImpactCollisionChecks += constraint.mNumContactPoints;
 		for (uint32 point_offset = constraint.mNumContactPoints; point_offset > 0; --point_offset)
 		{
 			const uint32 point_index = point_offset - 1;
@@ -2820,7 +2824,7 @@ bool ContactConstraintManager::SolveFrictionConstraints(const uint32 *inConstrai
 
 bool ContactConstraintManager::SolveVPhysicsImpactConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inDeltaTime)
 {
-	using DispatchFunc = bool (*)(ContactConstraintBase &, MotionProperties *, MotionProperties *, float, float, float, uint32 &);
+	using DispatchFunc = bool (*)(ContactConstraintBase &, MotionProperties *, MotionProperties *, float, float, float, uint32 &, VPhysicsSolverStats &);
 	static const DispatchFunc table[3][3] = {
 		{ nullptr, nullptr, sSolveVPhysicsImpactConstraint<EMotionType::Static, EMotionType::Dynamic> },
 		{ nullptr, nullptr, sSolveVPhysicsImpactConstraint<EMotionType::Kinematic, EMotionType::Dynamic> },
@@ -2832,6 +2836,7 @@ bool ContactConstraintManager::SolveVPhysicsImpactConstraints(const uint32 *inCo
 	};
 
 	bool any_impulse_applied = false;
+	VPhysicsSolverStats stats;
 	// IVP's MAXIMUM_SYSTEM_PUSH_NUMBER is one budget for the complete friction impact
 	// system. The adapter previously gave every Jolt manifold its own 5000-push budget,
 	// turning a pasted constrained building into contacts * 5000 nested solves.
@@ -2846,8 +2851,10 @@ bool ContactConstraintManager::SolveVPhysicsImpactConstraints(const uint32 *inCo
 		any_impulse_applied |= table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](
 			constraint, body1.GetMotionPropertiesUnchecked(), body2.GetMotionPropertiesUnchecked(),
 			inDeltaTime, mPhysicsSettings.mContactSeparationTarget,
-			interpenetration_rescue_speed, remaining_system_impacts);
+			interpenetration_rescue_speed, remaining_system_impacts, stats);
 	}
+	if (mContactListener != nullptr && !stats.IsEmpty())
+		mContactListener->OnVPhysicsSolverStats(stats);
 	return any_impulse_applied;
 }
 

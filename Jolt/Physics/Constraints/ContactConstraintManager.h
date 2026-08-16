@@ -23,6 +23,7 @@ JPH_SUPPRESS_WARNINGS_STD_END
 JPH_NAMESPACE_BEGIN
 
 struct PhysicsSettings;
+struct VPhysicsSolverStats;
 class PhysicsUpdateContext;
 
 /// A contact constraint manager manages all contacts between two bodies
@@ -576,7 +577,7 @@ private:
 	static bool					sSolveVelocityConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2);
 
 	template <EMotionType Type1, EMotionType Type2>
-	static bool					sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget, float inInterpenetrationRescueSpeed, uint32 &ioRemainingSystemImpacts);
+	static bool					sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget, float inInterpenetrationRescueSpeed, uint32 &ioRemainingSystemImpacts, VPhysicsSolverStats &ioStats);
 
 	template <bool SolveFriction, bool SolveNonPenetration, bool PersistentOnly>
 	bool						TemplatedSolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);

@@ -60,6 +60,22 @@ public:
 	Vec3					mRelativeAngularSurfaceVelocity = Vec3::sZero(); ///< Relative angular surface velocity between the bodies (world space angular surface velocity of body 2 - world space angular surface velocity of body 1). Note that this angular velocity is relative to the center of mass of body 1, so if you want it relative to body 2's center of mass you need to add body 2 angular velocity x (body 1 world space center of mass - body 2 world space center of mass) to mRelativeLinearSurfaceVelocity.
 };
 
+/// Per-environment counters emitted by the Source-compatible impact path. These are
+/// accumulated on worker threads and consumed by the adapter's IPhysicsEnvironment::ReadStats.
+struct VPhysicsSolverStats
+{
+	uint64					mImpactCount = 0;
+	uint64					mSystemImpactCount = 0;
+	uint64					mDelayedImpactCount = 0;
+	uint64					mImpactCollisionChecks = 0;
+
+	bool					IsEmpty() const
+	{
+		return mImpactCount == 0 && mSystemImpactCount == 0
+			&& mDelayedImpactCount == 0 && mImpactCollisionChecks == 0;
+	}
+};
+
 /// Return value for the OnContactValidate callback. Determines if the contact is being processed or not.
 /// Results are ordered so that the strongest accept has the lowest number and the strongest reject the highest number (which allows for easy combining of results)
 enum class ValidateResult
@@ -136,6 +152,10 @@ public:
 	/// OnContactAdded / OnContactPersisted run before solving and can only estimate it.
 	/// The impulse is the sum of all contact-point normal lambdas for this collision step.
 	virtual void			OnContactSolved([[maybe_unused]] const SubShapeIDPair &inSubShapePair, [[maybe_unused]] float inNormalImpulse) { /* Do nothing */ }
+
+	/// Called with counters from the Source-compatible solver. The callback can run from any
+	/// physics worker thread and must not call game code or mutate physics state.
+	virtual void			OnVPhysicsSolverStats([[maybe_unused]] const VPhysicsSolverStats &inStats) { /* Do nothing */ }
 
 	/// Called whenever a contact was detected last update but is not detected anymore.
 	///
