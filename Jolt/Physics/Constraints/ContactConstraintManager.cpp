@@ -2123,6 +2123,11 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 		* (1.0f + material_velocity_restitution);
 	const float friction_cos = 1.0f / Sqrt(1.0f + Square(impact_friction));
 	const float friction_sin = friction_cos * impact_friction;
+	// The adapter can deliberately disable IVP's penetration recovery for contacts
+	// owned by Source game movement (for example, a player already overlapping a
+	// wall). The impact response must still block an incoming velocity, but it must
+	// not add the separate rescue speed that would push the body out of the wall.
+	const bool allow_penetration_rescue = !constraint.mDisablePenetrationRecovery;
 	constexpr float cImpactEpsilon = 1.0e-4f;
 	constexpr uint32 cMaximumImpactsPerManifoldPoint = 32;
 	const float collision_tolerance = 0.5f * inContactSeparationTarget;
@@ -2365,34 +2370,40 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 			any_impulse_applied = true;
 		}
 
-		// Preserve IVP's minimum opening speed and penetration rescue. Do not reuse Jolt's
-		// precomputed velocity bias here: it is based on a different separation target and was
-		// frozen before Havana changed the body's velocity. IVP uses one collision tolerance as
-		// its inner impact distance, a base speed of two tolerances per second and twice the
-		// penetration deficit / dt as the rescue add-on, all with its 1.2 delay safety factor.
-		const float rescue_speed_addon = inDeltaTime > 0.0f
-			? 2.0f * max(0.0f, collision_tolerance - gap) / inDeltaTime
-			: 0.0f;
-		const float desired_opening_speed = 1.2f
-			* (inContactSeparationTarget + rescue_speed_addon);
-		const float current_opening_speed = get_relative_velocity(inPointIndex).Dot(normal);
-		// If the committed-speed scan selected this mindist while the effective speed (including a
-		// delayed speed_change) is already separating, IVP enters panic rescue mode. It clamps the
-		// existing separating speed to zero for the calculation and still adds one full rescue-speed
-		// push; without this, the same mindist is selected forever with a zero impulse.
-		const bool panic_rescue = initial_closing_speed <= cImpactEpsilon;
-		const float opening_speed_change = panic_rescue
-			? desired_opening_speed
-			: max(0.0f, desired_opening_speed - current_opening_speed);
-		if (opening_speed_change > 0.0f)
+		// Preserve IVP's minimum opening speed and penetration rescue when the adapter has
+		// not explicitly disabled that recovery path.
+		float rescue_speed_addon = 0.0f;
+		float desired_opening_speed = 0.0f;
+		if (allow_penetration_rescue)
 		{
-			const Vec3 push = -normal
-				* (opening_speed_change / inverse_virtual_mass);
-			apply_source_push(inPointIndex, push);
-			point_push += push;
-			any_impulse_applied = true;
+			// Preserve IVP's minimum opening speed and penetration rescue. Do not reuse
+			// Jolt's precomputed velocity bias here: it is based on a different separation
+			// target and was frozen before Havana changed the body's velocity.
+			rescue_speed_addon = inDeltaTime > 0.0f
+				? 2.0f * max(0.0f, collision_tolerance - gap) / inDeltaTime
+				: 0.0f;
+			desired_opening_speed = 1.2f
+				* (inContactSeparationTarget + rescue_speed_addon);
+			const float current_opening_speed = get_relative_velocity(inPointIndex).Dot(normal);
+			// If the committed-speed scan selected this mindist while the effective speed
+			// (including a delayed speed_change) is already separating, IVP enters panic
+			// rescue mode. It clamps the existing separating speed to zero for the
+			// calculation and still adds one full rescue-speed push; without this, the same
+			// mindist is selected forever with a zero impulse.
+			const bool panic_rescue = initial_closing_speed <= cImpactEpsilon;
+			const float opening_speed_change = panic_rescue
+				? desired_opening_speed
+				: max(0.0f, desired_opening_speed - current_opening_speed);
+			if (opening_speed_change > 0.0f)
+			{
+				const Vec3 push = -normal
+					* (opening_speed_change / inverse_virtual_mass);
+				apply_source_push(inPointIndex, push);
+				point_push += push;
+				any_impulse_applied = true;
+			}
 		}
-			total_push_on_body1[inPointIndex] += point_push;
+		total_push_on_body1[inPointIndex] += point_push;
 
 		// Match IVP_Impact_Solver::delay_decision. The side with the larger virtual mass is the
 		// candidate for delaying. If committing only the other side would still leave the contact
@@ -2484,7 +2495,7 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 		{
 			const uint32 point_index = point_offset - 1;
 			const float closing_speed = -get_committed_relative_velocity(point_index).Dot(normal);
-			const float rescue_speed_addon = inDeltaTime > 0.0f
+			const float rescue_speed_addon = allow_penetration_rescue && inDeltaTime > 0.0f
 				? 2.0f * max(0.0f, collision_tolerance - event_gap[point_index]) / inDeltaTime
 				: 0.0f;
 			const float predicted_distance = event_gap[point_index]
