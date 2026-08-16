@@ -2711,7 +2711,16 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
 			uint num_items = uint(constraints_end - constraints_begin) + uint(contacts_end - contacts_begin);
 			if (mPhysicsSettings.mUseLargeIslandSplitter
 				&& num_items >= LargeIslandSplitter::cLargeIslandTreshold)
+			{
+				// VPhysics contact islands are deliberately excluded from LargeIslandSplitter and
+				// were already solved as a whole during the velocity phase. They still need the
+				// common end-of-step work: refresh bounds, update sleep state and clear forces.
+				// Do not run another position solve here because that would change Source-style
+				// contact / vehicle behavior.
+				if (mContactManager.AreAnyContactsUsingVPhysicsSolver(contacts_begin, contacts_end))
+					CheckSleepAndUpdateBounds(island_idx, ioContext, ioStep, bodies_to_sleep);
 				continue;
+			}
 
 		#ifdef JPH_TRACK_SIMULATION_STATS
 			uint64 start_tick = GetProcessorTickCount();
