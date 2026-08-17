@@ -517,6 +517,7 @@ private:
 		float					mPlayerSupportStartupInitialNormalVelocity2 = 0.0f;
 		float					mPlayerSupportStartupDeltaTime = 0.0f;
 		float					mPlayerSupportStartupPenetration = -1.0f;
+		float					mVPhysicsNativeImpactTime = 0.0f;
 		uint32					mNumContactPoints;
 		bool					mContactImpacting = false;
 		bool					mContactHasCachedSupport = false;
@@ -525,6 +526,7 @@ private:
 		bool					mSevereInterpenetration = false;
 		bool					mPlayerSupportStartup = false;
 		bool					mPlayerSupportStartupCorrectionQueued = false;
+		bool					mVPhysicsNativeImpactCorrection = false;
 	};
 
 	/// Contact constraint class, used for solving penetrations

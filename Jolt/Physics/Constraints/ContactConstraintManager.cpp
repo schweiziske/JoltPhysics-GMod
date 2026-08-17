@@ -203,10 +203,18 @@ JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::Calcu
 				inSettings.mVPhysicsPlayerSupportStartupRescuePenetration >= 0.0f
 					? inSettings.mVPhysicsPlayerSupportStartupRescuePenetration
 					: inSettings.mVPhysicsPlayerSupportStartupPenetration;
-			const float rescue_penetration = inSettings.mVPhysicsPlayerSupportStartupContact
+			const float raw_rescue_penetration = inSettings.mVPhysicsPlayerSupportStartupContact
 				&& startup_rescue_penetration >= 0.0f
 				? startup_rescue_penetration
 				: max(0.0f, collision_tolerance - contact_gap);
+			// IVP's ordinary impact rescue is evaluated by an event-time mindist at the
+			// inner collision boundary. A Jolt manifold can instead be discovered after
+			// the complete discrete step and report a much deeper overlap. Feeding that
+			// post-event depth into 2 * depth / dt injects energy that IVP would route to
+			// its bounded anomaly manager instead. Keep the ordinary rescue within one
+			// collision-tolerance interval; deep overlap has its own explicit path.
+			const float rescue_penetration = min(
+				0.5f * inContactSeparationTarget, raw_rescue_penetration);
 			float rescue_addon = 2.0f * rescue_penetration / inDeltaTime;
 			float rescue_velocity = inContactRescueVelocityFactor * (inContactSeparationTarget + rescue_addon);
 			normal_velocity_bias = min(normal_velocity_bias,
@@ -1095,6 +1103,23 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 						&& !settings.mVPhysicsDeferPlayerSupportContact
 						&& !has_established_contact);
 				constraint->mContactImpacting |= fresh_impact;
+				if (fresh_impact && !constraint->mUseVPhysicsSolver
+					&& !constraint->mPlayerSupportStartup)
+				{
+					const Vec3 relative_velocity = inBody2.GetPointVelocity(p2_ws)
+						- inBody1.GetPointVelocity(p1_ws);
+					const float closing_speed = -relative_velocity.Dot(world_space_normal);
+					const float gap = Vec3(p2_ws - p1_ws).Dot(world_space_normal);
+					const float collision_tolerance = 0.5f * mPhysicsSettings.mContactSeparationTarget;
+					float impact_time = 0.0f;
+					if (gap > collision_tolerance && closing_speed > 1.0e-4f)
+						impact_time = Clamp((gap - collision_tolerance) / closing_speed,
+							0.0f, delta_time);
+					if (!constraint->mVPhysicsNativeImpactCorrection
+						|| impact_time < constraint->mVPhysicsNativeImpactTime)
+						constraint->mVPhysicsNativeImpactTime = impact_time;
+					constraint->mVPhysicsNativeImpactCorrection = true;
+				}
 				// A pending speculative manifold can persist for several updates before it actually
 				// crosses IVP's inner impact distance. That first supported update still gets the one
 				// restitution response; an already-supported rolling contact never does.
@@ -1515,6 +1540,23 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 					&& !settings.mVPhysicsDeferPlayerSupportContact
 					&& !has_established_contact);
 			constraint->mContactImpacting |= fresh_impact;
+			if (fresh_impact && !constraint->mUseVPhysicsSolver
+				&& !constraint->mPlayerSupportStartup)
+			{
+				const Vec3 relative_velocity = inBody2.GetPointVelocity(p2_ws)
+					- inBody1.GetPointVelocity(p1_ws);
+				const float closing_speed = -relative_velocity.Dot(inManifold.mWorldSpaceNormal);
+				const float gap = Vec3(p2_ws - p1_ws).Dot(inManifold.mWorldSpaceNormal);
+				const float collision_tolerance = 0.5f * mPhysicsSettings.mContactSeparationTarget;
+				float impact_time = 0.0f;
+				if (gap > collision_tolerance && closing_speed > 1.0e-4f)
+					impact_time = Clamp((gap - collision_tolerance) / closing_speed,
+						0.0f, delta_time);
+				if (!constraint->mVPhysicsNativeImpactCorrection
+					|| impact_time < constraint->mVPhysicsNativeImpactTime)
+					constraint->mVPhysicsNativeImpactTime = impact_time;
+				constraint->mVPhysicsNativeImpactCorrection = true;
+			}
 			bool allow_restitution = !mPhysicsSettings.mContactRestitutionOnlyOnNewContact
 				|| !contact_persisted || fresh_impact;
 			wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, inManifold.mWorldSpaceNormal, t1, t2, settings, mPhysicsSettings.mMinVelocityForRestitution, mPhysicsSettings.mContactSeparationTarget, mPhysicsSettings.mContactVelocityBiasFactorOutsideTarget, mPhysicsSettings.mContactVelocityBiasFactorInsideTarget, mPhysicsSettings.mContactRescueVelocityFactor, allow_contact_rescue, allow_restitution);
@@ -2439,7 +2481,8 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 			// Jolt's precomputed velocity bias here: it is based on a different separation
 			// target and was frozen before Havana changed the body's velocity.
 			rescue_speed_addon = inDeltaTime > 0.0f
-				? 2.0f * max(0.0f, collision_tolerance - gap) / inDeltaTime
+				? 2.0f * min(collision_tolerance,
+					max(0.0f, collision_tolerance - gap)) / inDeltaTime
 				: 0.0f;
 			desired_opening_speed = 1.2f
 				* (inContactSeparationTarget + rescue_speed_addon);
@@ -2557,7 +2600,8 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 			const uint32 point_index = point_offset - 1;
 			const float closing_speed = -get_committed_relative_velocity(point_index).Dot(normal);
 			const float rescue_speed_addon = allow_penetration_rescue && inDeltaTime > 0.0f
-				? 2.0f * max(0.0f, collision_tolerance - event_gap[point_index]) / inDeltaTime
+				? 2.0f * min(collision_tolerance,
+					max(0.0f, collision_tolerance - event_gap[point_index])) / inDeltaTime
 				: 0.0f;
 			const float predicted_distance = event_gap[point_index]
 				- (closing_speed + 0.5f * rescue_speed_addon) * inDeltaTime;
@@ -3123,12 +3167,63 @@ float ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioC
 {
 	ContactConstraint<Type1, Type2> &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
 	float normal_impulse = 0.0f;
+	const bool queue_native_impact_correction = constraint.mContactImpacting
+		&& constraint.mVPhysicsNativeImpactCorrection
+		&& !constraint.mUseVPhysicsSolver
+		&& !constraint.mSevereInterpenetration
+		&& !constraint.mPlayerSupportStartup
+		&& constraint.mVPhysicsNativeImpactTime > 0.0f;
+	Vec3 position_correction1 = Vec3::sZero();
+	Vec3 rotation_correction1 = Vec3::sZero();
+	Vec3 position_correction2 = Vec3::sZero();
+	Vec3 rotation_correction2 = Vec3::sZero();
+	Vec3 normal = Vec3::sZero();
+	Vec3 tangent1 = Vec3::sZero();
+	Vec3 tangent2 = Vec3::sZero();
+	RMat44 transform1;
+	RMat44 transform2;
+	Mat44 inv_i1 = Mat44::sZero();
+	Mat44 inv_i2 = Mat44::sZero();
+	if (queue_native_impact_correction)
+	{
+		normal = constraint.GetWorldSpaceNormal();
+		constraint.GetTangents(tangent1, tangent2);
+		transform1 = constraint.mBody1->GetCenterOfMassTransform();
+		transform2 = constraint.mBody2->GetCenterOfMassTransform();
+		if constexpr (Type1 == EMotionType::Dynamic)
+			inv_i1 = constraint.mInvInertiaScale1 * constraint.mBody1->GetInverseInertia();
+		if constexpr (Type2 == EMotionType::Dynamic)
+			inv_i2 = constraint.mInvInertiaScale2 * constraint.mBody2->GetInverseInertia();
+	}
 
 	for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
 	{
 		WorldContactPoint<Type1, Type2> &wcp = constraint.mContactPoints[i];
 
 		const float point_normal_impulse = wcp.mNonPenetrationConstraint.GetTotalLambda();
+		if (queue_native_impact_correction)
+		{
+			const Vec3 point_impulse = normal * point_normal_impulse
+				+ tangent1 * wcp.mFrictionConstraint1.GetTotalLambda()
+				+ tangent2 * wcp.mFrictionConstraint2.GetTotalLambda();
+			const RVec3 point1 = transform1
+				* Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mPosition1);
+			const RVec3 point2 = transform2
+				* Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mPosition2);
+			const RVec3 point = 0.5_r * (point1 + point2);
+			if constexpr (Type1 == EMotionType::Dynamic)
+			{
+				const Vec3 r1 = Vec3(point - constraint.mBody1->GetCenterOfMassPosition());
+				position_correction1 += constraint.mInvMass1 * point_impulse;
+				rotation_correction1 += inv_i1.Multiply3x3(r1.Cross(point_impulse));
+			}
+			if constexpr (Type2 == EMotionType::Dynamic)
+			{
+				const Vec3 r2 = Vec3(point - constraint.mBody2->GetCenterOfMassPosition());
+				position_correction2 -= constraint.mInvMass2 * point_impulse;
+				rotation_correction2 -= inv_i2.Multiply3x3(r2.Cross(point_impulse));
+			}
+		}
 		// An IVP impact impulse is not static support pressure. Keeping it as a warm-start or
 		// legacy normal lambda makes a separating body apply ground friction on the next PSI.
 		// Report the real impulse to callbacks, but only cache lambdas established by the normal
@@ -3153,6 +3248,16 @@ float ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioC
 				wcp.mContactPoint->mVPhysicsContactEstablished || point_normal_impulse > 0.0f;
 		}
 		normal_impulse += point_normal_impulse;
+	}
+	if (queue_native_impact_correction)
+	{
+		const float impact_time = constraint.mVPhysicsNativeImpactTime;
+		if constexpr (Type1 == EMotionType::Dynamic)
+			constraint.mBody1->GetMotionPropertiesUnchecked()->AddVPhysicsIntegrationCorrection(
+				position_correction1 * impact_time, rotation_correction1 * impact_time);
+		if constexpr (Type2 == EMotionType::Dynamic)
+			constraint.mBody2->GetMotionPropertiesUnchecked()->AddVPhysicsIntegrationCorrection(
+				position_correction2 * impact_time, rotation_correction2 * impact_time);
 	}
 	if (constraint.mPlayerSupportStartup && constraint.mContactImpacting
 		&& !constraint.mPlayerSupportStartupCorrectionQueued
@@ -3231,8 +3336,12 @@ template <EMotionType Type1, EMotionType Type2>
 bool ContactConstraintManager::sSolvePositionConstraint(ContactConstraintBase &ioConstraint, Body &ioBody1, Body &ioBody2, const PhysicsSettings &inSettings)
 {
 	ContactConstraint<Type1, Type2> &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
-	if (constraint.mDisablePenetrationRecovery
-		|| (constraint.mPlayerSupportStartup && constraint.mContactImpacting))
+	// IVP resolves a fresh impact in the velocity domain at the event time. Running
+	// Jolt's split-position correction for the same contact afterwards moves the body
+	// a second time without removing kinetic energy, which can make a dropped object
+	// rebound above its release height. Persistent contacts may still use the ordinary
+	// position stabilizer; only the frame that consumed the impact skips it.
+	if (constraint.mDisablePenetrationRecovery || constraint.mContactImpacting)
 		return false;
 
 	// Get transforms
