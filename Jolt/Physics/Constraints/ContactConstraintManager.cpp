@@ -1102,6 +1102,8 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 					|| (settings.mVPhysicsImpactingContact
 						&& !settings.mVPhysicsDeferPlayerSupportContact
 						&& !has_established_contact);
+				if (fresh_impact && settings.mVPhysicsUseLegacySolverForImpactOnly)
+					constraint->mUseVPhysicsSolver = true;
 				constraint->mContactImpacting |= fresh_impact;
 				if (fresh_impact && !constraint->mUseVPhysicsSolver
 					&& !constraint->mPlayerSupportStartup)
@@ -1539,6 +1541,8 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 				|| (settings.mVPhysicsImpactingContact
 					&& !settings.mVPhysicsDeferPlayerSupportContact
 					&& !has_established_contact);
+			if (fresh_impact && settings.mVPhysicsUseLegacySolverForImpactOnly)
+				constraint->mUseVPhysicsSolver = true;
 			constraint->mContactImpacting |= fresh_impact;
 			if (fresh_impact && !constraint->mUseVPhysicsSolver
 				&& !constraint->mPlayerSupportStartup)

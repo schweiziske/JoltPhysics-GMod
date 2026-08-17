@@ -49,6 +49,7 @@ public:
 	bool					mIsSensor;							///< If the contact should be treated as a sensor vs body contact (no collision response)
 	bool					mVPhysicsImpactingContact = false;	///< Adapter semantic: contact enters IVP's impact distance during this update.
 	bool					mVPhysicsUseLegacySolver = false;	///< Adapter semantic: solve the owning island with the IVP event-time contact path.
+	bool					mVPhysicsUseLegacySolverForImpactOnly = false; ///< Adapter semantic: use IVP event-time impact once, then return established support to Jolt's iterative contact solver.
 	bool					mVPhysicsDisablePenetrationRecovery = false; ///< Adapter semantic: keep velocity blocking but suppress rescue / split-position depenetration for this pair.
 	bool					mVPhysicsSevereInterpenetration = false; ///< Adapter semantic: route a failed deep-overlap mindist through IVP's bounded anomaly rescue.
 	bool					mVPhysicsCCDContact = false;		///< Adapter semantic: settings are being calculated for the continuous-collision pass.
