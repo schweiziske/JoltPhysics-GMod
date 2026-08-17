@@ -54,6 +54,18 @@ static bool IsLegacyTraceEnvironmentFlagSet(const char *inName)
 #endif
 }
 
+static bool IsLegacyStageTraceEnabled()
+{
+	static const bool enabled = IsLegacyTraceEnvironmentFlagSet("VJOLT_TRACE_LEGACY_STAGES");
+	return enabled;
+}
+
+static bool IsLegacyLargeOnlyTraceEnabled()
+{
+	static const bool enabled = IsLegacyTraceEnvironmentFlagSet("VJOLT_TRACE_LEGACY_LARGE_ONLY");
+	return enabled;
+}
+
 #ifdef JPH_DEBUG_RENDERER
 bool PhysicsSystem::sDrawMotionQualityLinearCast = false;
 #endif // JPH_DEBUG_RENDERER
@@ -1570,7 +1582,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				// Solve velocity constraints
 				const uint num_velocity_steps = steps_calculator.GetNumVelocitySteps();
 				const bool trace_legacy_stages = has_legacy_constraints
-					&& IsLegacyTraceEnvironmentFlagSet("VJOLT_TRACE_LEGACY_STAGES");
+					&& IsLegacyStageTraceEnabled();
 				auto trace_legacy_bodies = [&](const char *inStage)
 				{
 					if (!trace_legacy_stages)
@@ -1588,7 +1600,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 						const Vec3 w1 = body1->GetAngularVelocity();
 						const Vec3 v2 = body2->GetLinearVelocity();
 						const Vec3 w2 = body2->GetAngularVelocity();
-						if (IsLegacyTraceEnvironmentFlagSet("VJOLT_TRACE_LEGACY_LARGE_ONLY")
+						if (IsLegacyLargeOnlyTraceEnabled()
 							&& w1.LengthSq() < 1.0f && w2.LengthSq() < 1.0f)
 							continue;
 						std::fprintf(stderr,

@@ -25,6 +25,30 @@ JPH_NAMESPACE_BEGIN
 
 using namespace literals;
 
+static bool IsPlayerSupportSpreadPenetrationEnabled()
+{
+	static const bool enabled = std::getenv("VJOLT_TEST_PLAYER_SUPPORT_SPREAD_PENETRATION") != nullptr;
+	return enabled;
+}
+
+static bool IsPlayerSupportCacheTraceEnabled()
+{
+	static const bool enabled = std::getenv("VJOLT_TRACE_PLAYER_SUPPORT_CACHE_ACTIVE") != nullptr;
+	return enabled;
+}
+
+static bool IsVPhysicsImpactTraceEnabled()
+{
+	static const bool enabled = std::getenv("VJOLT_TRACE_VPHYSICS_IMPACT") != nullptr;
+	return enabled;
+}
+
+static bool IsLegacyFrictionTraceEnabled()
+{
+	static const bool enabled = std::getenv("VJOLT_TRACE_LEGACY_FRICTION") != nullptr;
+	return enabled;
+}
+
 #ifdef JPH_DEBUG_RENDERER
 bool ContactConstraintManager::sDrawContactPoint = false;
 bool ContactConstraintManager::sDrawSupportingFaces = false;
@@ -976,7 +1000,7 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 					settings.mVPhysicsPlayerSupportStartupPenetration;
 			}
 			else if (settings.mVPhysicsPlayerSupportStartupContact
-				&& std::getenv("VJOLT_TEST_PLAYER_SUPPORT_SPREAD_PENETRATION") != nullptr)
+				&& IsPlayerSupportSpreadPenetrationEnabled())
 			{
 				const float live_penetration = max(0.0f, penetration_depth);
 				const float remaining_feature_count = max(1.0f, float(output_cm->mNumContactPoints - 1));
@@ -1057,7 +1081,7 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 					|| ccp.mVPhysicsFrictionNormalLambda > 0.0f;
 				const bool has_established_contact = has_cached_support
 					|| ccp.mVPhysicsContactEstablished;
-				if (std::getenv("VJOLT_TRACE_PLAYER_SUPPORT_CACHE_ACTIVE") != nullptr)
+				if (IsPlayerSupportCacheTraceEnabled())
 					std::fprintf(stderr,
 						"PLAYER_SUPPORT_CACHE cached b1=%u b2=%u point=%u lambda=%.9g legacy=%.9g established=%d startup=%d impacting=%d\n",
 						inBody1.GetID().GetIndexAndSequenceNumber(), inBody2.GetID().GetIndexAndSequenceNumber(),
@@ -1288,7 +1312,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 				max(0.0f, inManifold.mPenetrationDepth);
 		}
 		else if (settings.mVPhysicsPlayerSupportStartupContact
-			&& std::getenv("VJOLT_TEST_PLAYER_SUPPORT_SPREAD_PENETRATION") != nullptr)
+			&& IsPlayerSupportSpreadPenetrationEnabled())
 		{
 			const float live_penetration = max(0.0f, inManifold.mPenetrationDepth);
 			const float remaining_feature_count = max(1.0f, float(inManifold.mRelativeContactPointsOn1.size() - 1));
@@ -1477,7 +1501,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 				|| legacy_friction_normal_lambda > 0.0f;
 			const bool has_established_contact = has_cached_support
 				|| legacy_contact_established;
-			if (std::getenv("VJOLT_TRACE_PLAYER_SUPPORT_CACHE_ACTIVE") != nullptr)
+			if (IsPlayerSupportCacheTraceEnabled())
 				std::fprintf(stderr,
 					"PLAYER_SUPPORT_CACHE added b1=%u b2=%u point=%d lambda=%.9g legacy=%.9g established=%d startup=%d impacting=%d\n",
 					inBody1.GetID().GetIndexAndSequenceNumber(), inBody2.GetID().GetIndexAndSequenceNumber(),
@@ -2082,7 +2106,7 @@ template <EMotionType Type1, EMotionType Type2>
 bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget, float inInterpenetrationRescueSpeed, uint32 &ioRemainingSystemImpacts, VPhysicsSolverStats &ioStats)
 {
 	ContactConstraint<Type1, Type2> &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
-	const bool trace_impact = std::getenv("VJOLT_TRACE_VPHYSICS_IMPACT") != nullptr;
+	const bool trace_impact = IsVPhysicsImpactTraceEnabled();
 	if (trace_impact)
 		std::fprintf(stderr, "VPHYSICS_IMPACT_ROUTE b1=%u b2=%u active=%d points=%u\n",
 			constraint.mBody1->GetID().GetIndexAndSequenceNumber(),
@@ -2634,7 +2658,7 @@ bool ContactConstraintManager::sSolveLegacyFrictionConstraint(ContactConstraintB
 	Mat44 inv_i2 = Mat44::sZero();
 	if constexpr (Type2 == EMotionType::Dynamic)
 		inv_i2 = constraint.mInvInertiaScale2 * constraint.mBody2->GetInverseInertia();
-	const bool trace_friction = std::getenv("VJOLT_TRACE_LEGACY_FRICTION") != nullptr;
+	const bool trace_friction = IsLegacyFrictionTraceEnabled();
 
 	Vec3 linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2;
 	sGetVelocities<Type1, Type2>(ioMotionProperties1, ioMotionProperties2, linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2);
