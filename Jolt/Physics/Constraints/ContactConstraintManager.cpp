@@ -2252,6 +2252,8 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 	float earliest_impact_time = inDeltaTime;
 	uint32 initial_impact_point = MaxContactPoints;
 	float initial_feature_order = -FLT_MAX;
+	bool late_discrete_impact_point[MaxContactPoints] = {};
+	float late_discrete_impact_correction = 0.0f;
 	for (uint32 point_index = 0; point_index < constraint.mNumContactPoints; ++point_index)
 	{
 		WorldContactPoint<Type1, Type2> &wcp = constraint.mContactPoints[point_index];
@@ -2262,7 +2264,22 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 		const Vec3 relative_velocity = linear_velocity2 + angular_velocity2.Cross(r2)
 			- linear_velocity1 - angular_velocity1.Cross(r1);
 		const float closing_speed = -relative_velocity.Dot(normal);
-		const float gap = Vec3(point2 - point1).Dot(normal);
+		const float raw_gap = Vec3(point2 - point1).Dot(normal);
+		// A body can cross IVP's collision boundary in one update while remaining
+		// below Jolt's radius-scaled CCD threshold. The resulting new manifold is a
+		// late ordinary impact, not a failed interpenetrating mindist. Reconstruct
+		// the boundary event so a fixed negative gap cannot trigger repeated rescue.
+		const float penetration_to_boundary = collision_tolerance - raw_gap;
+		const bool late_discrete_impact = !constraint.mContactHasCachedSupport
+			&& closing_speed > cImpactEpsilon
+			&& raw_gap < collision_tolerance
+			&& penetration_to_boundary <= closing_speed * inDeltaTime
+				+ collision_tolerance;
+		late_discrete_impact_point[point_index] = late_discrete_impact;
+		if (late_discrete_impact)
+			late_discrete_impact_correction = max(
+				late_discrete_impact_correction, penetration_to_boundary);
+		const float gap = late_discrete_impact ? collision_tolerance : raw_gap;
 		float impact_time = inDeltaTime + 1.0f;
 		if (gap <= collision_tolerance)
 			impact_time = 0.0f;
@@ -2328,7 +2345,10 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 			* Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mPosition2);
 		event_r1[point_index] = Vec3(event_point1[point_index] - event_com1);
 		event_r2[point_index] = Vec3(event_point2[point_index] - event_com2);
-		event_gap[point_index] = Vec3(event_point2[point_index] - event_point1[point_index]).Dot(normal);
+		const float raw_event_gap = Vec3(
+			event_point2[point_index] - event_point1[point_index]).Dot(normal);
+		event_gap[point_index] = late_discrete_impact_point[point_index]
+			? max(collision_tolerance, raw_event_gap) : raw_event_gap;
 		total_push_on_body1[point_index] = Vec3::sZero();
 	}
 
@@ -2645,6 +2665,27 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 
 	if (any_impulse_applied)
 	{
+		// Rewind a one-frame discrete overshoot to IVP's impact boundary. This is a
+		// position reconstruction of the missed event, not penetration velocity:
+		// distribute it by inverse mass and preserve the solver's outgoing speeds.
+		// Genuine deep teleports fail the one-frame plausibility test and remain on
+		// the bounded anomaly-rescue path.
+		if (late_discrete_impact_correction > 0.0f)
+		{
+			const float inverse_mass_sum = constraint.mInvMass1 + constraint.mInvMass2;
+			if (inverse_mass_sum > 0.0f)
+			{
+				if constexpr (Type1 == EMotionType::Dynamic)
+					ioMotionProperties1->AddVPhysicsIntegrationCorrection(
+						-normal * (late_discrete_impact_correction
+							* constraint.mInvMass1 / inverse_mass_sum), Vec3::sZero());
+				if constexpr (Type2 == EMotionType::Dynamic)
+					ioMotionProperties2->AddVPhysicsIntegrationCorrection(
+						normal * (late_discrete_impact_correction
+							* constraint.mInvMass2 / inverse_mass_sum), Vec3::sZero());
+			}
+		}
+
 		// A friction contact created by this event only exists for the remainder of the PSI.
 		// Seed its spring with exactly that post-impact time slice; subsequent persistent frames
 		// accumulate their full interval after all velocity controllers have run.
