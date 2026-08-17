@@ -156,7 +156,7 @@ public:
 	/// (see e.g. PointConstraint::GetTotalLambdaPosition) went over a certain limit and then disabling the constraint.
 	/// Note that although a disabled constraint will not affect the simulation in any way anymore, it does incur some processing overhead.
 	/// Alternatively you can remove a constraint from the constraint manager (which may be more costly if you want to disable the constraint for a short while).
-	void						SetEnabled(bool inEnabled)					{ mEnabled = inEnabled; }
+	void						SetEnabled(bool inEnabled);
 
 	/// Test if a constraint is enabled.
 	bool						GetEnabled() const							{ return mEnabled; }
@@ -324,7 +324,7 @@ public:
 
 	void					AddConstraint(Constraint *inConstraint);
 	void					RemoveConstraint(Constraint *inConstraint);
-	void					PrepareVelocitySolve() { mSolvePending.store(true, std::memory_order_release); }
+	void					PrepareVelocitySolve();
 	void					SetAdditionalIterations(int inAdditionalIterations) { mAdditionalIterations = inAdditionalIterations; }
 	int						GetAdditionalIterations() const { return mAdditionalIterations; }
 	size_t					GetConstraintCount() const { return mConstraints.size(); }
@@ -334,6 +334,8 @@ public:
 	bool					SolveVelocityConstraints(Constraint *inCaller, float inDeltaTime);
 
 private:
+	friend class Constraint;
+
 	struct SolverEntry
 	{
 		Constraint *				mConstraint;
@@ -342,12 +344,23 @@ private:
 	};
 
 	void						RebuildSolverStorageLayout();
+	void						InvalidateSolverMetadata();
+	void						RefreshSolverMetadata() const;
+
+	static constexpr uint8		cSolverMetadataValid = 1 << 0;
+	static constexpr uint8		cRequiresPostContactSolve = 1 << 1;
+	static constexpr uint8		cSolverPrepareUnprepared = 0;
+	static constexpr uint8		cSolverPrepareInitializing = 1;
+	static constexpr uint8		cSolverPrepareReady = 2;
 
 	std::vector<Constraint *>		mConstraints;
 	std::vector<size_t>			mSolverStorageOffsets;
 	std::vector<std::max_align_t>	mSolverStorage;
 	std::vector<SolverEntry>		mActiveSolverEntries;
 	std::atomic<bool>			mSolvePending{ false };
+	std::atomic<uint8>			mSolverPrepareState{ cSolverPrepareUnprepared };
+	mutable std::atomic<Constraint *>	mSolverRepresentative{ nullptr };
+	mutable std::atomic<uint8>		mSolverMetadata{ 0 };
 	int							mAdditionalIterations = 0;
 	bool						mRollbackOnBreak = false;
 };

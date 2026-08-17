@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 
 JPH_NAMESPACE_BEGIN
 
@@ -79,8 +80,20 @@ void Constraint::SaveState(StateRecorder &inStream) const
 
 void Constraint::RestoreState(StateRecorder &inStream)
 {
-	inStream.Read(mEnabled);
+	bool enabled = false;
+	inStream.Read(enabled);
+	SetEnabled(enabled);
 	mLegacyBroken.store(false, std::memory_order_release);
+}
+
+void Constraint::SetEnabled(bool inEnabled)
+{
+	if (mEnabled == inEnabled)
+		return;
+
+	mEnabled = inEnabled;
+	if (mLegacyConstraintGroup != nullptr)
+		mLegacyConstraintGroup->InvalidateSolverMetadata();
 }
 
 void Constraint::ToConstraintSettings(ConstraintSettings &outSettings) const
@@ -200,6 +213,7 @@ void LegacyConstraintGroup::AddConstraint(Constraint *inConstraint)
 	{
 		mConstraints.push_back(inConstraint);
 		RebuildSolverStorageLayout();
+		InvalidateSolverMetadata();
 	}
 	inConstraint->SetLegacyConstraintGroup(this);
 }
@@ -209,30 +223,80 @@ void LegacyConstraintGroup::RemoveConstraint(Constraint *inConstraint)
 	if (inConstraint->GetLegacyConstraintGroup() == this)
 		inConstraint->SetLegacyConstraintGroup(nullptr);
 	if (std::erase(mConstraints, inConstraint) != 0)
+	{
 		RebuildSolverStorageLayout();
+		InvalidateSolverMetadata();
+	}
+}
+
+void LegacyConstraintGroup::InvalidateSolverMetadata()
+{
+	mSolverMetadata.store(0, std::memory_order_release);
+}
+
+void LegacyConstraintGroup::RefreshSolverMetadata() const
+{
+	if ((mSolverMetadata.load(std::memory_order_acquire) & cSolverMetadataValid) != 0)
+		return;
+
+	Constraint *representative = nullptr;
+	bool requires_post_contact_solve = false;
+	for (Constraint *constraint : mConstraints)
+		if (constraint->IsActive())
+		{
+			if (representative == nullptr)
+				representative = constraint;
+			if (constraint->RequiresPostContactLegacySolve())
+				requires_post_contact_solve = true;
+			else
+			{
+				requires_post_contact_solve = false;
+				break;
+			}
+		}
+
+	mSolverRepresentative.store(representative, std::memory_order_relaxed);
+	const uint8 metadata = cSolverMetadataValid
+		| (representative != nullptr && requires_post_contact_solve? cRequiresPostContactSolve : 0);
+	mSolverMetadata.store(metadata, std::memory_order_release);
+}
+
+void LegacyConstraintGroup::PrepareVelocitySolve()
+{
+	uint8 prepare_state = mSolverPrepareState.load(std::memory_order_acquire);
+	if (prepare_state == cSolverPrepareReady)
+		return;
+
+	uint8 expected = cSolverPrepareUnprepared;
+	if (mSolverPrepareState.compare_exchange_strong(expected, cSolverPrepareInitializing,
+		std::memory_order_acq_rel, std::memory_order_acquire))
+	{
+		// Body activation and runtime constraint modes can change without changing group
+		// membership. Rebuild this small metadata snapshot once per collision step, after
+		// Jolt has frozen the active-constraint list for that step.
+		InvalidateSolverMetadata();
+		RefreshSolverMetadata();
+		mSolvePending.store(true, std::memory_order_release);
+		mSolverPrepareState.store(cSolverPrepareReady, std::memory_order_release);
+		return;
+	}
+
+	// Setup runs in parallel batches. Only the first member scans the group; other members
+	// wait for that short publication instead of repeating the scan or writing mSolvePending.
+	while (mSolverPrepareState.load(std::memory_order_acquire) == cSolverPrepareInitializing)
+		std::this_thread::yield();
 }
 
 bool LegacyConstraintGroup::IsSolverRepresentative(const Constraint *inCaller) const
 {
-	for (Constraint *constraint : mConstraints)
-		if (constraint->IsActive())
-			return constraint == inCaller;
-
-	return false;
+	RefreshSolverMetadata();
+	return mSolverRepresentative.load(std::memory_order_relaxed) == inCaller;
 }
 
 bool LegacyConstraintGroup::RequiresPostContactSolve() const
 {
-	bool has_active_constraint = false;
-	for (Constraint *constraint : mConstraints)
-		if (constraint->IsActive())
-		{
-			has_active_constraint = true;
-			if (!constraint->RequiresPostContactLegacySolve())
-				return false;
-		}
-
-	return has_active_constraint;
+	RefreshSolverMetadata();
+	return (mSolverMetadata.load(std::memory_order_relaxed) & cRequiresPostContactSolve) != 0;
 }
 
 bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float inDeltaTime)
@@ -364,6 +428,7 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 		std::fprintf(stderr, "LEGACY_GROUP_END group=%p solves=%u broken=%d\n",
 			static_cast<void *>(this), solveOrdinal, groupBroken ? 1 : 0);
 	destroy_solver_storage();
+	mSolverPrepareState.store(cSolverPrepareUnprepared, std::memory_order_release);
 
 	(void)inCaller;
 	return appliedImpulse;
