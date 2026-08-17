@@ -248,7 +248,7 @@ void TriangleShape::CastRay(const RayCast &inRay, const RayCastSettings &inRayCa
 		return;
 
 	// Back facing check
-	if (inRayCastSettings.mBackFaceModeTriangles == EBackFaceMode::IgnoreBackFaces && (mV2 - mV1).Cross(mV3 - mV1).Dot(inRay.mDirection) > 0.0f)
+	if (!mCollideWithBackFaces && inRayCastSettings.mBackFaceModeTriangles == EBackFaceMode::IgnoreBackFaces && (mV2 - mV1).Cross(mV3 - mV1).Dot(inRay.mDirection) > 0.0f)
 		return;
 
 	// Test ray against triangle
@@ -289,7 +289,10 @@ void TriangleShape::sCollideConvexVsTriangle(const Shape *inShape1, const Shape 
 	JPH_ASSERT(inShape2->GetSubType() == EShapeSubType::Triangle);
 	const TriangleShape *shape2 = static_cast<const TriangleShape *>(inShape2);
 
-	CollideConvexVsTriangles collider(shape1, inScale1, inScale2, inCenterOfMassTransform1, inCenterOfMassTransform2, inSubShapeIDCreator1.GetID(), inCollideShapeSettings, ioCollector);
+	CollideShapeSettings settings = inCollideShapeSettings;
+	if (shape2->mCollideWithBackFaces)
+		settings.mBackFaceMode = EBackFaceMode::CollideWithBackFaces;
+	CollideConvexVsTriangles collider(shape1, inScale1, inScale2, inCenterOfMassTransform1, inCenterOfMassTransform2, inSubShapeIDCreator1.GetID(), settings, ioCollector);
 	collider.Collide(shape2->mV1, shape2->mV2, shape2->mV3, 0b111, inSubShapeIDCreator2.GetID());
 }
 
@@ -300,7 +303,10 @@ void TriangleShape::sCollideSphereVsTriangle(const Shape *inShape1, const Shape 
 	JPH_ASSERT(inShape2->GetSubType() == EShapeSubType::Triangle);
 	const TriangleShape *shape2 = static_cast<const TriangleShape *>(inShape2);
 
-	CollideSphereVsTriangles collider(shape1, inScale1, inScale2, inCenterOfMassTransform1, inCenterOfMassTransform2, inSubShapeIDCreator1.GetID(), inCollideShapeSettings, ioCollector);
+	CollideShapeSettings settings = inCollideShapeSettings;
+	if (shape2->mCollideWithBackFaces)
+		settings.mBackFaceMode = EBackFaceMode::CollideWithBackFaces;
+	CollideSphereVsTriangles collider(shape1, inScale1, inScale2, inCenterOfMassTransform1, inCenterOfMassTransform2, inSubShapeIDCreator1.GetID(), settings, ioCollector);
 	collider.Collide(shape2->mV1, shape2->mV2, shape2->mV3, 0b111, inSubShapeIDCreator2.GetID());
 }
 
@@ -309,7 +315,10 @@ void TriangleShape::sCastConvexVsTriangle(const ShapeCast &inShapeCast, const Sh
 	JPH_ASSERT(inShape->GetSubType() == EShapeSubType::Triangle);
 	const TriangleShape *shape = static_cast<const TriangleShape *>(inShape);
 
-	CastConvexVsTriangles caster(inShapeCast, inShapeCastSettings, inScale, inCenterOfMassTransform2, inSubShapeIDCreator1, ioCollector);
+	ShapeCastSettings settings = inShapeCastSettings;
+	if (shape->mCollideWithBackFaces)
+		settings.mBackFaceModeTriangles = EBackFaceMode::CollideWithBackFaces;
+	CastConvexVsTriangles caster(inShapeCast, settings, inScale, inCenterOfMassTransform2, inSubShapeIDCreator1, ioCollector);
 	caster.Cast(shape->mV1, shape->mV2, shape->mV3, 0b111, inSubShapeIDCreator2.GetID());
 }
 
@@ -318,7 +327,10 @@ void TriangleShape::sCastSphereVsTriangle(const ShapeCast &inShapeCast, const Sh
 	JPH_ASSERT(inShape->GetSubType() == EShapeSubType::Triangle);
 	const TriangleShape *shape = static_cast<const TriangleShape *>(inShape);
 
-	CastSphereVsTriangles caster(inShapeCast, inShapeCastSettings, inScale, inCenterOfMassTransform2, inSubShapeIDCreator1, ioCollector);
+	ShapeCastSettings settings = inShapeCastSettings;
+	if (shape->mCollideWithBackFaces)
+		settings.mBackFaceModeTriangles = EBackFaceMode::CollideWithBackFaces;
+	CastSphereVsTriangles caster(inShapeCast, settings, inScale, inCenterOfMassTransform2, inSubShapeIDCreator1, ioCollector);
 	caster.Cast(shape->mV1, shape->mV2, shape->mV3, 0b111, inSubShapeIDCreator2.GetID());
 }
 

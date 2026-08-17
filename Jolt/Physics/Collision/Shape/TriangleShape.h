@@ -52,6 +52,12 @@ public:
 	/// Convex radius
 	float					GetConvexRadius() const																{ return mConvexRadius; }
 
+	/// Allow this triangle to participate in collision detection from both sides.
+	/// Disabled by default to preserve normal Jolt triangle semantics. This is a
+	/// runtime compatibility flag; owners that serialize it restore it explicitly.
+	void					SetCollideWithBackFaces(bool inCollide)										{ mCollideWithBackFaces = inCollide; }
+	bool					GetCollideWithBackFaces() const											{ return mCollideWithBackFaces; }
+
 	// See Shape::GetLocalBounds
 	virtual AABox			GetLocalBounds() const override;
 
@@ -138,6 +144,7 @@ private:
 	Vec3					mV2;
 	Vec3					mV3;
 	float					mConvexRadius = 0.0f;
+	bool					mCollideWithBackFaces = false;
 };
 
 JPH_NAMESPACE_END
