@@ -3269,35 +3269,21 @@ float ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioC
 				rotation_correction2 -= inv_i2.Multiply3x3(r2.Cross(point_impulse));
 			}
 		}
-		// An IVP impact impulse is not static support pressure. Keeping it as a warm-start or
-		// legacy normal lambda makes a separating body apply ground friction on the next PSI.
-		// Report the real impulse to callbacks, but only cache lambdas established by the normal
-		// distance keeper on a non-impacting contact.
-		if (constraint.mContactImpacting)
-		{
-			wcp.mContactPoint->mNonPenetrationLambda = 0.0f;
-			wcp.mContactPoint->mFrictionLambda[0] = 0.0f;
-			wcp.mContactPoint->mFrictionLambda[1] = 0.0f;
-			wcp.mContactPoint->mVPhysicsFrictionNormalLambda = 0.0f;
-			wcp.mContactPoint->mVPhysicsContactEstablished =
-				!constraint.mPlayerSupportStartup;
-			Vec3::sZero().StoreFloat3(&wcp.mContactPoint->mVPhysicsFrictionDisplacement);
-		}
-		else
-		{
-			wcp.mContactPoint->mNonPenetrationLambda = point_normal_impulse;
-			wcp.mContactPoint->mFrictionLambda[0] = wcp.mFrictionConstraint1.GetTotalLambda();
-			wcp.mContactPoint->mFrictionLambda[1] = wcp.mFrictionConstraint2.GetTotalLambda();
-			wcp.mContactPoint->mVPhysicsFrictionNormalLambda = point_normal_impulse;
-			wcp.mContactPoint->mVPhysicsContactEstablished =
-				wcp.mContactPoint->mVPhysicsContactEstablished || point_normal_impulse > 0.0f;
-
-			// IVP GetNormalForce exposes now_friction_pressure from the distance keeper,
-			// not the one-shot impulse that created a friction contact. Collision callbacks
-			// already receive the impact velocity; publishing that impulse as support pressure
-			// makes Source stress damage treat an ordinary hit as sustained crushing force.
+		// Preserve the exact solver warm-start state for the next PSI. Whether this lambda
+		// represents an impact or a distance-keeper pressure is decided by the listener/cache
+		// below; changing these values here alters the actual collision solver and can lock a
+		// player on slopes.
+		wcp.mContactPoint->mNonPenetrationLambda = point_normal_impulse;
+		wcp.mContactPoint->mFrictionLambda[0] = wcp.mFrictionConstraint1.GetTotalLambda();
+		wcp.mContactPoint->mFrictionLambda[1] = wcp.mFrictionConstraint2.GetTotalLambda();
+		wcp.mContactPoint->mVPhysicsFrictionNormalLambda = point_normal_impulse;
+		wcp.mContactPoint->mVPhysicsContactEstablished =
+			wcp.mContactPoint->mVPhysicsContactEstablished || point_normal_impulse > 0.0f;
+		// The listener's normal-pressure value is the distance-keeper contribution. The
+		// one-shot impact lambda is still retained in the solver cache above, but is not
+		// published as continuous Source friction pressure.
+		if ( !constraint.mContactImpacting )
 			normal_impulse += point_normal_impulse;
-		}
 	}
 	if (queue_native_impact_correction)
 	{
