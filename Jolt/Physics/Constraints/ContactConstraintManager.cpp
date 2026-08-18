@@ -3291,8 +3291,13 @@ float ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioC
 			wcp.mContactPoint->mVPhysicsFrictionNormalLambda = point_normal_impulse;
 			wcp.mContactPoint->mVPhysicsContactEstablished =
 				wcp.mContactPoint->mVPhysicsContactEstablished || point_normal_impulse > 0.0f;
+
+			// IVP GetNormalForce exposes now_friction_pressure from the distance keeper,
+			// not the one-shot impulse that created a friction contact. Collision callbacks
+			// already receive the impact velocity; publishing that impulse as support pressure
+			// makes Source stress damage treat an ordinary hit as sustained crushing force.
+			normal_impulse += point_normal_impulse;
 		}
-		normal_impulse += point_normal_impulse;
 	}
 	if (queue_native_impact_correction)
 	{
@@ -3371,9 +3376,10 @@ void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inConstraintOf
 			next_constraint = nullptr;
 
 		// Dispatch to the correct templated form
+		const bool was_impact = constraint.mContactImpacting;
 		const float normal_impulse = table[(int)constraint.mBody1->GetMotionType()][(int)constraint.mBody2->GetMotionType()](constraint);
 		if (mContactListener != nullptr)
-			mContactListener->OnContactSolved(constraint.mSubShapePair, normal_impulse);
+			mContactListener->OnContactSolved(constraint.mSubShapePair, normal_impulse, was_impact);
 	}
 }
 

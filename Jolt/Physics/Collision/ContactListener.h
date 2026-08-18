@@ -152,7 +152,8 @@ public:
 	/// This adapter extension exposes the resolved pressure needed by Source's friction snapshot;
 	/// OnContactAdded / OnContactPersisted run before solving and can only estimate it.
 	/// The impulse is the sum of all contact-point normal lambdas for this collision step.
-	virtual void			OnContactSolved([[maybe_unused]] const SubShapeIDPair &inSubShapePair, [[maybe_unused]] float inNormalImpulse) { /* Do nothing */ }
+	/// inWasImpact remains true for the collision step that establishes the friction contact.
+	virtual void			OnContactSolved([[maybe_unused]] const SubShapeIDPair &inSubShapePair, [[maybe_unused]] float inNormalImpulse, [[maybe_unused]] bool inWasImpact) { /* Do nothing */ }
 
 	/// Called with counters from the Source-compatible solver. The callback can run from any
 	/// physics worker thread and must not call game code or mutate physics state.
