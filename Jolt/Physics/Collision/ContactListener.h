@@ -56,6 +56,7 @@ public:
 	bool					mVPhysicsDeferPlayerSupportContact = false; ///< Adapter semantic: suppress physical response for this newly touching player support until the next update.
 	bool					mVPhysicsPlayerSupportStartupContact = false; ///< Adapter semantic: exact-touch player support that has not established friction yet.
 	bool					mVPhysicsUseNativeContactTuning = false; ///< Adapter semantic: ordinary unconstrained rigid-body contact uses Jolt's native distance/bias equation.
+	bool					mVPhysicsUseLegacyFriction = false; ///< Adapter semantic: solve tangential friction with the IVP/Havana friction state while Jolt retains the normal contact solve.
 	float					mVPhysicsNormalImpulseReportScale = 1.0f; ///< Adapter semantic: report the physical support load while retaining solver-space lambda for warm starting and friction.
 	float					mVPhysicsPlayerSupportStartupPenetration = -1.0f; ///< Adapter semantic: first real penetration of an exact-touch support mindist, in physics units.
 	float					mVPhysicsPlayerSupportStartupRescuePenetration = -1.0f; ///< Adapter semantic: transient per-update rescue depth; never persisted to the manifold cache.

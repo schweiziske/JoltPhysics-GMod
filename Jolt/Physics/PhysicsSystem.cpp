@@ -1559,6 +1559,8 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				active_constraints, constraints_begin, constraints_end);
 			const bool has_vphysics_contacts = mContactManager.AreAnyContactsUsingVPhysicsSolver(
 				contacts_begin, contacts_end);
+			const bool has_legacy_friction = mContactManager.AreAnyContactsUsingLegacyFriction(
+				contacts_begin, contacts_end);
 			if (has_contacts && !has_legacy_constraints && !has_vphysics_contacts)
 			{
 				float min_inverse_mass = FLT_MAX;
@@ -1647,7 +1649,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					bool applied_impulse = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
 					if (velocity_step == 0)
 					{
-						if (use_legacy_contact_solver)
+						if (has_legacy_friction || use_legacy_contact_solver)
 						{
 							trace_legacy_bodies("pre");
 							// IVP evaluates each contact controller independently. A fresh impact on one
@@ -1672,7 +1674,6 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 							trace_legacy_bodies("after_contact_impact");
 							mContactManager.ResetNonPenetrationLambdas(contacts_begin, contacts_end);
 							applied_impulse |= mContactManager.SolvePersistentNonPenetrationConstraints(contacts_begin, contacts_end);
-							mContactManager.IntegrateLegacyFrictionState(contacts_begin, contacts_end, delta_time);
 							trace_legacy_bodies("after_normal");
 						}
 					}
@@ -1681,6 +1682,8 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					if (!applied_impulse)
 						break;
 				}
+				if (has_legacy_friction || use_legacy_contact_solver)
+					mContactManager.IntegrateLegacyFrictionState(contacts_begin, contacts_end, delta_time);
 
 				// Save back the lambdas in the contact cache for the warm start of the next physics update
 				mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);

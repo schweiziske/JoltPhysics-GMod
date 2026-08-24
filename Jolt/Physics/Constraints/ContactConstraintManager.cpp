@@ -885,6 +885,7 @@ JPH_INLINE ContactConstraintManager::ContactConstraint<Type1, Type2> *ContactCon
 	constraint->mInvInertiaScale2 = inSettings.mInvInertiaScale2;
 	constraint->mNumContactPoints = inNumContactPoints;
 	constraint->mUseVPhysicsSolver = inSettings.mVPhysicsUseLegacySolver;
+	constraint->mUseLegacyFriction = inSettings.mVPhysicsUseLegacyFriction;
 	constraint->mDisablePenetrationRecovery = inSettings.mVPhysicsDisablePenetrationRecovery;
 	constraint->mSevereInterpenetration = inSettings.mVPhysicsSevereInterpenetration;
 	constraint->mPlayerSupportStartup = inSettings.mVPhysicsPlayerSupportStartupContact;
@@ -1955,7 +1956,10 @@ void ContactConstraintManager::sWarmStartConstraint(ContactConstraintBase &ioCon
 		// Warm starting: Apply impulse from last frame
 		if constexpr (WarmStartFriction)
 		{
-			if (wcp.mFrictionConstraint1.IsActive() || wcp.mFrictionConstraint2.IsActive())
+			// Legacy friction recomputes a fresh local 2D solve from its stored
+			// displacement. Do not apply Jolt's tangential warm start first.
+			if (!constraint.mUseLegacyFriction && !constraint.mUseVPhysicsSolver
+				&& (wcp.mFrictionConstraint1.IsActive() || wcp.mFrictionConstraint2.IsActive()))
 			{
 				if (wcp.mFrictionConstraint1.WarmStart(linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, constraint.mInvMass1, constraint.mInvMass2, t1, inWarmStartImpulseRatio))
 					any_impulse_applied = true;
@@ -2101,6 +2105,7 @@ bool ContactConstraintManager::sSolveVelocityConstraint(ContactConstraintBase &i
 
 	// First apply all friction constraints (non-penetration is more important than friction)
 	if constexpr (SolveFriction)
+	if (!constraint.mUseLegacyFriction && !constraint.mUseVPhysicsSolver)
 	for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
 	{
 		WorldContactPoint<Type1, Type2> &wcp = constraint.mContactPoints[i];
@@ -2748,7 +2753,7 @@ bool ContactConstraintManager::sSolveLegacyFrictionConstraint(ContactConstraintB
 		return false;
 
 	ContactConstraint<Type1, Type2> &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
-	if (constraint.mContactImpacting)
+	if ((!constraint.mUseLegacyFriction && !constraint.mUseVPhysicsSolver) || constraint.mContactImpacting)
 		return false;
 	Vec3 t1, t2;
 	constraint.GetTangents(t1, t2);
@@ -2890,7 +2895,7 @@ void ContactConstraintManager::sIntegrateLegacyFrictionState(ContactConstraintBa
 		return;
 
 	ContactConstraint<Type1, Type2> &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
-	if (constraint.mContactImpacting)
+	if ((!constraint.mUseLegacyFriction && !constraint.mUseVPhysicsSolver) || constraint.mContactImpacting)
 		return;
 	Vec3 t1, t2;
 	constraint.GetTangents(t1, t2);
@@ -3197,6 +3202,20 @@ bool ContactConstraintManager::AreAnyContactsUsingVPhysicsSolver(const uint32 *i
 	{
 		const ContactConstraintBase &constraint = *reinterpret_cast<const ContactConstraintBase *>(mConstraints + *offset);
 		if (constraint.mUseVPhysicsSolver)
+			return true;
+	}
+	return false;
+}
+
+bool ContactConstraintManager::AreAnyContactsUsingLegacyFriction(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const
+{
+	if (inConstraintOffsetBegin >= inConstraintOffsetEnd)
+		return false;
+
+	for (const uint32 *offset = inConstraintOffsetBegin; offset < inConstraintOffsetEnd; ++offset)
+	{
+		const ContactConstraintBase &constraint = *reinterpret_cast<const ContactConstraintBase *>(mConstraints + *offset);
+		if (constraint.mUseLegacyFriction)
 			return true;
 	}
 	return false;

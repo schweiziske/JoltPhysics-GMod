@@ -239,6 +239,7 @@ public:
 	/// True when any contact in this range is predicted to enter IVP's impact distance this update.
 	bool						AreAnyContactsImpacting(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
 	bool						AreAnyContactsUsingVPhysicsSolver(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
+	bool						AreAnyContactsUsingLegacyFriction(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
 	bool						AreAnyContactIndicesUsingVPhysicsSolver(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const;
 
 	/// Save back the lambdas to the contact cache for the next warm start
@@ -523,6 +524,7 @@ private:
 		bool					mContactImpacting = false;
 		bool					mContactHasCachedSupport = false;
 		bool					mUseVPhysicsSolver = false;
+		bool					mUseLegacyFriction = false;
 		bool					mDisablePenetrationRecovery = false;
 		bool					mSevereInterpenetration = false;
 		bool					mPlayerSupportStartup = false;
