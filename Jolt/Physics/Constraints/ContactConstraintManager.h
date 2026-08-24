@@ -525,6 +525,7 @@ private:
 		bool					mDisablePenetrationRecovery = false;
 		bool					mSevereInterpenetration = false;
 		bool					mPlayerSupportStartup = false;
+		bool					mUseNativeContactTuning = false;
 		bool					mPlayerSupportStartupCorrectionQueued = false;
 		bool					mVPhysicsNativeImpactCorrection = false;
 	};

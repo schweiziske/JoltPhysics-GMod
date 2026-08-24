@@ -55,6 +55,7 @@ public:
 	bool					mVPhysicsCCDContact = false;		///< Adapter semantic: settings are being calculated for the continuous-collision pass.
 	bool					mVPhysicsDeferPlayerSupportContact = false; ///< Adapter semantic: suppress physical response for this newly touching player support until the next update.
 	bool					mVPhysicsPlayerSupportStartupContact = false; ///< Adapter semantic: exact-touch player support that has not established friction yet.
+	bool					mVPhysicsUseNativeContactTuning = false; ///< Adapter semantic: ordinary unconstrained rigid-body contact uses Jolt's native distance/bias equation.
 	float					mVPhysicsPlayerSupportStartupPenetration = -1.0f; ///< Adapter semantic: first real penetration of an exact-touch support mindist, in physics units.
 	float					mVPhysicsPlayerSupportStartupRescuePenetration = -1.0f; ///< Adapter semantic: transient per-update rescue depth; never persisted to the manifold cache.
 	Vec3					mRelativeLinearSurfaceVelocity = Vec3::sZero(); ///< Relative linear surface velocity between the bodies (world space surface velocity of body 2 - world space surface velocity of body 1), can be used to create a conveyor belt effect

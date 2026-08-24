@@ -888,6 +888,7 @@ JPH_INLINE ContactConstraintManager::ContactConstraint<Type1, Type2> *ContactCon
 	constraint->mDisablePenetrationRecovery = inSettings.mVPhysicsDisablePenetrationRecovery;
 	constraint->mSevereInterpenetration = inSettings.mVPhysicsSevereInterpenetration;
 	constraint->mPlayerSupportStartup = inSettings.mVPhysicsPlayerSupportStartupContact;
+	constraint->mUseNativeContactTuning = inSettings.mVPhysicsUseNativeContactTuning;
 	constraint->mPlayerSupportStartupPenetration =
 		inSettings.mVPhysicsPlayerSupportStartupRescuePenetration >= 0.0f
 			? inSettings.mVPhysicsPlayerSupportStartupRescuePenetration
@@ -1126,7 +1127,13 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 				// crosses IVP's inner impact distance. That first supported update still gets the one
 				// restitution response; an already-supported rolling contact never does.
 				bool allow_restitution = !mPhysicsSettings.mContactRestitutionOnlyOnNewContact || fresh_impact;
-				wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, world_space_normal, t1, t2, settings, min_velocity_for_restitution, mPhysicsSettings.mContactSeparationTarget, mPhysicsSettings.mContactVelocityBiasFactorOutsideTarget, mPhysicsSettings.mContactVelocityBiasFactorInsideTarget, mPhysicsSettings.mContactRescueVelocityFactor, allow_contact_rescue, allow_restitution);
+				const bool native_tuning = settings.mVPhysicsUseNativeContactTuning;
+				wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, world_space_normal, t1, t2, settings, min_velocity_for_restitution,
+					native_tuning? 0.0f : mPhysicsSettings.mContactSeparationTarget,
+					native_tuning? 0.0f : mPhysicsSettings.mContactVelocityBiasFactorOutsideTarget,
+					native_tuning? 0.0f : mPhysicsSettings.mContactVelocityBiasFactorInsideTarget,
+					native_tuning? 0.0f : mPhysicsSettings.mContactRescueVelocityFactor,
+					allow_contact_rescue, allow_restitution);
 			}
 
 		#ifdef JPH_DEBUG_RENDERER
@@ -1563,7 +1570,13 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 			}
 			bool allow_restitution = !mPhysicsSettings.mContactRestitutionOnlyOnNewContact
 				|| !contact_persisted || fresh_impact;
-			wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, inManifold.mWorldSpaceNormal, t1, t2, settings, mPhysicsSettings.mMinVelocityForRestitution, mPhysicsSettings.mContactSeparationTarget, mPhysicsSettings.mContactVelocityBiasFactorOutsideTarget, mPhysicsSettings.mContactVelocityBiasFactorInsideTarget, mPhysicsSettings.mContactRescueVelocityFactor, allow_contact_rescue, allow_restitution);
+			const bool native_tuning = settings.mVPhysicsUseNativeContactTuning;
+			wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, inManifold.mWorldSpaceNormal, t1, t2, settings, mPhysicsSettings.mMinVelocityForRestitution,
+				native_tuning? 0.0f : mPhysicsSettings.mContactSeparationTarget,
+				native_tuning? 0.0f : mPhysicsSettings.mContactVelocityBiasFactorOutsideTarget,
+				native_tuning? 0.0f : mPhysicsSettings.mContactVelocityBiasFactorInsideTarget,
+				native_tuning? 0.0f : mPhysicsSettings.mContactRescueVelocityFactor,
+				allow_contact_rescue, allow_restitution);
 		}
 
 	#ifdef JPH_DEBUG_RENDERER
@@ -3403,7 +3416,8 @@ bool ContactConstraintManager::sSolvePositionConstraint(ContactConstraintBase &i
 		// IVP's outer friction distance is maintained by its velocity-level distance keeper. Its
 		// hard positional boundary remains the inner collision distance (one collision tolerance),
 		// regardless of whether the contact already carries support pressure.
-		const float separation_target = 0.5f * inSettings.mContactSeparationTarget;
+		const float separation_target = constraint.mUseNativeContactTuning?
+			0.0f : 0.5f * inSettings.mContactSeparationTarget;
 		float separation = max(Vec3(p2 - p1).Dot(ws_normal) - separation_target + inSettings.mPenetrationSlop, -inSettings.mMaxPenetrationDistance);
 
 		// Only enforce constraint when separation < 0 (otherwise we're apart)

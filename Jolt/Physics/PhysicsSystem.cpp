@@ -1555,8 +1555,39 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 			bool is_large_island = true;
 		#endif
 			CalculateSolverSteps steps_calculator(mPhysicsSettings);
+			const bool has_legacy_constraints = ConstraintManager::sHasLegacyConstraints(
+				active_constraints, constraints_begin, constraints_end);
 			const bool has_vphysics_contacts = mContactManager.AreAnyContactsUsingVPhysicsSolver(
 				contacts_begin, contacts_end);
+			if (has_contacts && !has_legacy_constraints && !has_vphysics_contacts)
+			{
+				float min_inverse_mass = FLT_MAX;
+				float max_inverse_mass = 0.0f;
+				BodyID *bodies_begin, *bodies_end;
+				mIslandBuilder.GetBodiesInIsland(island_idx, bodies_begin, bodies_end);
+				for (const BodyID *body_id = bodies_begin; body_id < bodies_end; ++body_id)
+				{
+					const Body &body = mBodyManager.GetBody(*body_id);
+					if (!body.IsDynamic())
+						continue;
+
+					const float inverse_mass = body.GetMotionPropertiesUnchecked()->GetInverseMassUnchecked();
+					if (inverse_mass <= 0.0f)
+						continue;
+
+					min_inverse_mass = min(min_inverse_mass, inverse_mass);
+					max_inverse_mass = max(max_inverse_mass, inverse_mass);
+				}
+
+				// Jolt's HeavyOnLightTest documents this exact failure mode and recommends
+				// raising velocity iterations from 10 to 30. A few extra position passes
+				// remove the residual numerical drift after the velocity solve.
+				if (min_inverse_mass < FLT_MAX && max_inverse_mass / min_inverse_mass >= 10.0f)
+				{
+					steps_calculator.SetMinimumVelocitySteps(30);
+					steps_calculator.SetMinimumPositionSteps(4);
+				}
+			}
 			if (!mPhysicsSettings.mUseLargeIslandSplitter
 				|| has_vphysics_contacts
 				|| !mLargeIslandSplitter.SplitIsland(island_idx, mIslandBuilder, mBodyManager, mContactManager, active_constraints, steps_calculator))
@@ -1566,9 +1597,10 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 			#endif
 
 				// We didn't create a split, just run the solver now for this entire island. Begin by warm starting.
-				const bool has_legacy_constraints = ConstraintManager::sHasLegacyConstraints(
-					active_constraints, constraints_begin, constraints_end);
-				const bool use_legacy_contact_solver = has_legacy_constraints || has_vphysics_contacts;
+				// Source constraints and Source contacts are independent compatibility
+				// boundaries. A Havana constraint must not force every ordinary contact in
+				// its island off Jolt's warm-started iterative contact solver.
+				const bool use_legacy_contact_solver = has_vphysics_contacts;
 				ConstraintManager::sWarmStartVelocityConstraints(active_constraints, constraints_begin, constraints_end, warm_start_impulse_ratio, steps_calculator);
 				if (use_legacy_contact_solver)
 					mContactManager.RegisterVelocityConstraints(contacts_begin, contacts_end, steps_calculator);
@@ -1613,9 +1645,9 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				for (uint velocity_step = 0; velocity_step < num_velocity_steps; ++velocity_step)
 				{
 					bool applied_impulse = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
-					if (use_legacy_contact_solver)
+					if (velocity_step == 0)
 					{
-						if (velocity_step == 0)
+						if (use_legacy_contact_solver)
 						{
 							trace_legacy_bodies("pre");
 							// IVP evaluates each contact controller independently. A fresh impact on one
@@ -1624,9 +1656,18 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 							mContactManager.ResetImpactingLegacyFrictionState(contacts_begin, contacts_end);
 							applied_impulse |= mContactManager.SolveLegacyFrictionConstraints(contacts_begin, contacts_end, delta_time);
 							trace_legacy_bodies("after_friction");
+						}
+						if (has_legacy_constraints)
+						{
 							applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
 							applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
 							trace_legacy_bodies("after_havana");
+						}
+					}
+					if (use_legacy_contact_solver)
+					{
+						if (velocity_step == 0)
+						{
 							applied_impulse |= mContactManager.SolveVPhysicsImpactConstraints(contacts_begin, contacts_end, delta_time);
 							trace_legacy_bodies("after_contact_impact");
 							mContactManager.ResetNonPenetrationLambdas(contacts_begin, contacts_end);

@@ -39,6 +39,12 @@ public:
 			mNumPositionSteps = max(mNumPositionSteps, mSettings.mNumPositionSteps);
 	}
 
+	/// Raise the minimum solver budget for this island without modifying any body or
+	/// constraint override. This is useful for transient island-wide conditions such
+	/// as Jolt's heavy-on-light stacking case.
+	JPH_INLINE void				SetMinimumVelocitySteps(uint inNumSteps)		{ mNumVelocitySteps = max(mNumVelocitySteps, inNumSteps); }
+	JPH_INLINE void				SetMinimumPositionSteps(uint inNumSteps)		{ mNumPositionSteps = max(mNumPositionSteps, inNumSteps); }
+
 	/// Get the results of the calculation
 	JPH_INLINE uint				GetNumPositionSteps() const					{ return mNumPositionSteps; }
 	JPH_INLINE uint				GetNumVelocitySteps() const					{ return mNumVelocitySteps; }
