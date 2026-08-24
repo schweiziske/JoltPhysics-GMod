@@ -518,6 +518,7 @@ private:
 		float					mPlayerSupportStartupDeltaTime = 0.0f;
 		float					mPlayerSupportStartupPenetration = -1.0f;
 		float					mVPhysicsNativeImpactTime = 0.0f;
+		float					mVPhysicsNormalImpulseReportScale = 1.0f;
 		uint32					mNumContactPoints;
 		bool					mContactImpacting = false;
 		bool					mContactHasCachedSupport = false;

@@ -889,6 +889,7 @@ JPH_INLINE ContactConstraintManager::ContactConstraint<Type1, Type2> *ContactCon
 	constraint->mSevereInterpenetration = inSettings.mVPhysicsSevereInterpenetration;
 	constraint->mPlayerSupportStartup = inSettings.mVPhysicsPlayerSupportStartupContact;
 	constraint->mUseNativeContactTuning = inSettings.mVPhysicsUseNativeContactTuning;
+	constraint->mVPhysicsNormalImpulseReportScale = inSettings.mVPhysicsNormalImpulseReportScale;
 	constraint->mPlayerSupportStartupPenetration =
 		inSettings.mVPhysicsPlayerSupportStartupRescuePenetration >= 0.0f
 			? inSettings.mVPhysicsPlayerSupportStartupRescuePenetration
@@ -3378,7 +3379,8 @@ void ContactConstraintManager::StoreAppliedImpulses(const uint32 *inConstraintOf
 		const bool was_impact = constraint.mContactImpacting;
 		const float normal_impulse = table[(int)constraint.mBody1->GetMotionType()][(int)constraint.mBody2->GetMotionType()](constraint);
 		if (mContactListener != nullptr)
-			mContactListener->OnContactSolved(constraint.mSubShapePair, normal_impulse, was_impact);
+			mContactListener->OnContactSolved(constraint.mSubShapePair,
+				normal_impulse * constraint.mVPhysicsNormalImpulseReportScale, was_impact);
 	}
 }
 
