@@ -231,6 +231,21 @@ public:
 // The template specialization doesn't sit well with Doxygen
 #ifndef JPH_PLATFORM_DOXYGEN
 
+/// A scalar effective mass needs a reciprocal, not the dynamic pivot bookkeeping used
+/// by GaussianElimination. The latter's 1x1 instantiation faults in the MSVC 19.44
+/// optimized build used by Volt. Keep the generic inverse's singular tolerance and
+/// copy-before-write behavior, including when input and output alias.
+template <>
+inline bool Matrix<1, 1>::SetInversed(const Matrix<1, 1> &inM)
+{
+	const float value = inM.mCol[0].mF32[0];
+	mCol[0].mF32[0] = 1.0f;
+	if (abs(value) < 1.0e-16f)
+		return false;
+	mCol[0].mF32[0] = 1.0f / value;
+	return true;
+}
+
 /// Specialization of SetInversed for 2x2 matrix
 template <>
 inline bool Matrix<2, 2>::SetInversed(const Matrix<2, 2> &inM)

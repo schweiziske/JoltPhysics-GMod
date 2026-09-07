@@ -1386,7 +1386,7 @@ void PhysicsSystem::JobFinalizeIslands(PhysicsUpdateContext *ioContext)
 
 	// Prepare the large island splitter
 	if (mPhysicsSettings.mUseLargeIslandSplitter)
-		mLargeIslandSplitter.Prepare(mIslandBuilder, mContactManager,
+		mLargeIslandSplitter.Prepare(mIslandBuilder, mContactManager, ioContext->mActiveConstraints,
 			mBodyManager.GetNumActiveBodies(EBodyType::RigidBody), ioContext->mTempAllocator);
 }
 
@@ -1451,29 +1451,12 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					{
 						// Solve velocity constraints
 						ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
-						const bool has_contacts = contacts_begin != contacts_end;
-						const bool any_contact_impacting = has_contacts
-							&& mContactManager.AreAnyContactsImpacting(contacts_begin, contacts_end);
-						if (!has_contacts || any_contact_impacting)
-						{
-							// IVP predicts whether the current gap reaches its impact distance during
-							// this PSI. Keep Havana ahead of that impact impulse; resting friction is
-							// handled after contact convergence below.
-							ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
-							ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
-						}
 						mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
 					}
 
 					// Mark the batch as processed
 					bool last_iteration, final_batch;
 					mLargeIslandSplitter.MarkBatchProcessed(split_island_index, constraints_begin, constraints_end, contacts_begin, contacts_end, last_iteration, final_batch);
-					if (last_iteration && contacts_begin != contacts_end
-						&& !mContactManager.AreAnyContactsImpacting(contacts_begin, contacts_end))
-					{
-						ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
-						ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
-					}
 
 					// Save back the lambdas in the contact cache for the warm start of the next physics update
 					if (last_iteration)
@@ -1592,6 +1575,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 			}
 			if (!mPhysicsSettings.mUseLargeIslandSplitter
 				|| has_vphysics_contacts
+				|| has_legacy_constraints
 				|| !mLargeIslandSplitter.SplitIsland(island_idx, mIslandBuilder, mBodyManager, mContactManager, active_constraints, steps_calculator))
 			{
 			#ifdef JPH_TRACK_SIMULATION_STATS
@@ -1661,8 +1645,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 						}
 						if (has_legacy_constraints)
 						{
-							applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, false);
-							applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time, true);
+							applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
 							trace_legacy_bodies("after_havana");
 						}
 					}
@@ -2774,8 +2757,14 @@ void PhysicsSystem::JobSolvePositionConstraints(PhysicsUpdateContext *ioContext,
 				// Do not run another position solve here because that would change Source-style
 				// contact / vehicle behavior.
 				if (mContactManager.AreAnyContactsUsingVPhysicsSolver(contacts_begin, contacts_end))
+				{
 					CheckSleepAndUpdateBounds(island_idx, ioContext, ioStep, bodies_to_sleep);
-				continue;
+					continue;
+				}
+				// Havana-only exclusions still require the normal position/sleep/bounds
+				// finalization below. Only native split islands are finalized by batches.
+				if (!ConstraintManager::sHasLegacyConstraints(active_constraints, constraints_begin, constraints_end))
+					continue;
 			}
 
 		#ifdef JPH_TRACK_SIMULATION_STATS

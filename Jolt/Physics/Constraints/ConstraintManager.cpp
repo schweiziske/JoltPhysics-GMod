@@ -11,6 +11,7 @@
 #include <Jolt/Physics/PhysicsLock.h>
 #include <Jolt/Core/Profiler.h>
 #include <Jolt/Core/QuickSort.h>
+#include <unordered_map>
 
 JPH_NAMESPACE_BEGIN
 
@@ -122,8 +123,7 @@ void ConstraintManager::sSetupVelocityConstraints(Constraint **inActiveConstrain
 	for (Constraint **c = inActiveConstraints, **c_end = inActiveConstraints + inNumActiveConstraints; c < c_end; ++c)
 	{
 		(*c)->SetupVelocityConstraint(inDeltaTime);
-		if (LegacyConstraintGroup *group = (*c)->GetLegacyConstraintGroup())
-			group->PrepareVelocitySolve();
+		(*c)->mLegacyPostContactSolveInIsland = false;
 	}
 }
 
@@ -171,20 +171,43 @@ bool ConstraintManager::sHasLegacyConstraints(Constraint **inActiveConstraints, 
 	return false;
 }
 
-bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, bool inPostContactOnly)
+bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime)
 {
 	JPH_PROFILE_FUNCTION();
 
-	bool any_impulse_applied = false;
+	struct IslandGroup
+	{
+		LegacyConstraintGroup *mGroup;
+		std::vector<Constraint *> mMembers;
+		bool mPostContact = true;
+	};
+	std::vector<IslandGroup> groups;
+	std::unordered_map<LegacyConstraintGroup *, size_t> group_indices;
 	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
-		if (LegacyConstraintGroup *group = c->GetLegacyConstraintGroup();
-			group != nullptr
-			&& group->RequiresPostContactSolve() == inPostContactOnly
-			&& group->IsSolverRepresentative(c))
-			any_impulse_applied |= group->SolveVelocityConstraints(c, inDeltaTime);
+		if (LegacyConstraintGroup *group = c->GetLegacyConstraintGroup())
+		{
+			auto [entry, inserted] = group_indices.try_emplace(group, groups.size());
+			if (inserted)
+				groups.push_back({ group, {}, true });
+			IslandGroup &batch = groups[entry->second];
+			batch.mMembers.push_back(c);
+			batch.mPostContact &= c->RequiresPostContactLegacySolve();
+		}
 	}
+	// Preserve the existing two controller phases and first-encounter group order. The hash
+	// table is only an index; neither addresses nor hash iteration determine solve order.
+	bool any_impulse_applied = false;
+	for (bool post_contact : { false, true })
+		for (IslandGroup &batch : groups)
+			if (batch.mPostContact == post_contact)
+			{
+				for (Constraint *c : batch.mMembers)
+					c->mLegacyPostContactSolveInIsland = post_contact;
+				any_impulse_applied |= batch.mGroup->SolveVelocityConstraints(
+					batch.mMembers.data(), batch.mMembers.size(), inDeltaTime);
+			}
 	return any_impulse_applied;
 }
 
@@ -197,7 +220,7 @@ bool ConstraintManager::sSolvePostContactLegacyVelocityMembers(Constraint **inAc
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
 		LegacyConstraintGroup *group = c->GetLegacyConstraintGroup();
-		if (group == nullptr || group->RequiresPostContactSolve() || !c->RequiresPostContactLegacySolve())
+		if (group == nullptr || c->RequiresPostContactSolveInIsland() || !c->RequiresPostContactLegacySolve())
 			continue;
 
 		// The LCS already completed its normal Havana pass. Correct only this predictive member
@@ -216,9 +239,9 @@ bool ConstraintManager::sSolvePositionConstraints(Constraint **inActiveConstrain
 	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
-		if (LegacyConstraintGroup *group = c->GetLegacyConstraintGroup())
+		if (c->GetLegacyConstraintGroup())
 		{
-			if (!group->RequiresPostContactSolve())
+			if (!c->RequiresPostContactSolveInIsland())
 				any_impulse_applied |= c->SolvePositionConstraintInLegacyGroup(inDeltaTime, inBaumgarte);
 		}
 		else

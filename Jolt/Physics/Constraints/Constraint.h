@@ -269,6 +269,8 @@ public:
 
 	void						SetLegacyConstraintGroup(LegacyConstraintGroup *inGroup) { mLegacyConstraintGroup = inGroup; }
 	LegacyConstraintGroup *		GetLegacyConstraintGroup() const { return mLegacyConstraintGroup; }
+	/// Classification of this step's island-local group slice, never of remote group members.
+	bool						RequiresPostContactSolveInIsland() const { return mLegacyPostContactSolveInIsland; }
 
 protected:
 	/// Helper function to copy settings back to constraint settings for this base class
@@ -309,14 +311,14 @@ private:
 	float						mLegacyAngularBreakLimit = 0.0f;
 	std::atomic<bool>			mLegacyBroken{ false };
 	LegacyConstraintGroup *		mLegacyConstraintGroup = nullptr;
+	size_t						mLegacyGroupIndex = 0;
+	bool						mLegacyPostContactSolveInIsland = false;
 
 	bool						CheckLegacyBreakAfterSolve(Vec3Arg inLinearVelocity1, Vec3Arg inAngularVelocity1, Vec3Arg inLinearVelocity2, Vec3Arg inAngularVelocity2, bool inRollbackOnBreak);
 };
 
-/// Coordinates Source's local-constraint-system ordering for a complete group
-/// of Jolt constraints. Ordinary mixed groups retain the adapter's controller
-/// pass; pure predictive micro-angle groups can opt into a refreshed
-/// post-contact pass.
+/// Source group metadata and Havana work storage. Scheduling belongs to Jolt's real islands:
+/// a solve receives only that island's members, even when a Source group spans several islands.
 class JPH_EXPORT LegacyConstraintGroup final
 {
 public:
@@ -324,14 +326,11 @@ public:
 
 	void					AddConstraint(Constraint *inConstraint);
 	void					RemoveConstraint(Constraint *inConstraint);
-	void					PrepareVelocitySolve();
 	void					SetAdditionalIterations(int inAdditionalIterations) { mAdditionalIterations = inAdditionalIterations; }
 	int						GetAdditionalIterations() const { return mAdditionalIterations; }
 	size_t					GetConstraintCount() const { return mConstraints.size(); }
 	void					SetRollbackOnBreak(bool inRollbackOnBreak) { mRollbackOnBreak = inRollbackOnBreak; }
-	bool					RequiresPostContactSolve() const;
-	bool					IsSolverRepresentative(const Constraint *inCaller) const;
-	bool					SolveVelocityConstraints(Constraint *inCaller, float inDeltaTime);
+	bool					SolveVelocityConstraints(Constraint *const *inMembers, size_t inMemberCount, float inDeltaTime);
 
 private:
 	friend class Constraint;
@@ -342,25 +341,17 @@ private:
 		void *					mStorage;
 		size_t					mConstraintIndex;
 	};
+	// MSVC's max_align_t is only 8-byte aligned; Havana's Vec3/Mat44 work needs 16.
+	struct alignas(JPH_VECTOR_ALIGNMENT) SolverStorageWord
+	{
+		std::byte mBytes[JPH_VECTOR_ALIGNMENT];
+	};
 
 	void						RebuildSolverStorageLayout();
-	void						InvalidateSolverMetadata();
-	void						RefreshSolverMetadata() const;
-
-	static constexpr uint8		cSolverMetadataValid = 1 << 0;
-	static constexpr uint8		cRequiresPostContactSolve = 1 << 1;
-	static constexpr uint8		cSolverPrepareUnprepared = 0;
-	static constexpr uint8		cSolverPrepareInitializing = 1;
-	static constexpr uint8		cSolverPrepareReady = 2;
 
 	std::vector<Constraint *>		mConstraints;
 	std::vector<size_t>			mSolverStorageOffsets;
-	std::vector<std::max_align_t>	mSolverStorage;
-	std::vector<SolverEntry>		mActiveSolverEntries;
-	std::atomic<bool>			mSolvePending{ false };
-	std::atomic<uint8>			mSolverPrepareState{ cSolverPrepareUnprepared };
-	mutable std::atomic<Constraint *>	mSolverRepresentative{ nullptr };
-	mutable std::atomic<uint8>		mSolverMetadata{ 0 };
+	std::vector<SolverStorageWord>	mSolverStorage;
 	int							mAdditionalIterations = 0;
 	bool						mRollbackOnBreak = false;
 };

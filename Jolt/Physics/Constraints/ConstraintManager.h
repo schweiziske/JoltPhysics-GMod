@@ -67,9 +67,9 @@ public:
 
 	static bool				sHasLegacyConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
 
-	/// Execute pure predictive micro-angle legacy groups after Jolt's outer contact iterations.
-	/// Mixed Source systems retain their ordinary controller pass.
-	static bool				sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, bool inPostContactOnly);
+	/// Execute one Havana controller pass using only members of the current Jolt island.
+	/// The caller owns the once-per-step boundary; no group representative can schedule remote work.
+	static bool				sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime);
 
 	/// Refresh predictive micro-angle members after contacts. This removes contact-generated angular
 	/// velocity without moving an otherwise mixed Weld/Rope group to the post-contact controller stage.

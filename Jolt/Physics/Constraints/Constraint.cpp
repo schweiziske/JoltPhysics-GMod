@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <thread>
 
 JPH_NAMESPACE_BEGIN
 
@@ -92,8 +91,6 @@ void Constraint::SetEnabled(bool inEnabled)
 		return;
 
 	mEnabled = inEnabled;
-	if (mLegacyConstraintGroup != nullptr)
-		mLegacyConstraintGroup->InvalidateSolverMetadata();
 }
 
 void Constraint::ToConstraintSettings(ConstraintSettings &outSettings) const
@@ -186,6 +183,7 @@ void LegacyConstraintGroup::RebuildSolverStorageLayout()
 	for (size_t index = 0; index < mConstraints.size(); ++index)
 	{
 		Constraint *constraint = mConstraints[index];
+		constraint->mLegacyGroupIndex = index;
 		const size_t constraint_size = constraint->GetLegacySolverStorageSize();
 		if (constraint_size == 0)
 		{
@@ -194,26 +192,28 @@ void LegacyConstraintGroup::RebuildSolverStorageLayout()
 		}
 
 		const size_t alignment = constraint->GetLegacySolverStorageAlignment();
-		JPH_ASSERT(alignment > 0 && alignment <= alignof(std::max_align_t)
+		JPH_ASSERT(alignment > 0 && alignment <= alignof(SolverStorageWord)
 			&& (alignment & (alignment - 1)) == 0);
 		storage_size = (storage_size + alignment - 1) & ~(alignment - 1);
 		mSolverStorageOffsets[index] = storage_size;
 		storage_size += constraint_size;
 	}
 
-	const size_t storage_words = (storage_size + sizeof(std::max_align_t) - 1)
-		/ sizeof(std::max_align_t);
+	const size_t storage_words = (storage_size + sizeof(SolverStorageWord) - 1)
+		/ sizeof(SolverStorageWord);
 	mSolverStorage.resize(storage_words);
-	mActiveSolverEntries.reserve(mConstraints.size());
 }
 
 void LegacyConstraintGroup::AddConstraint(Constraint *inConstraint)
 {
+	// Membership is exclusive. Moving a constraint must not leave a stale executable entry
+	// in its former Source group.
+	if (LegacyConstraintGroup *previous = inConstraint->GetLegacyConstraintGroup(); previous != nullptr && previous != this)
+		previous->RemoveConstraint(inConstraint);
 	if (std::find(mConstraints.begin(), mConstraints.end(), inConstraint) == mConstraints.end())
 	{
 		mConstraints.push_back(inConstraint);
 		RebuildSolverStorageLayout();
-		InvalidateSolverMetadata();
 	}
 	inConstraint->SetLegacyConstraintGroup(this);
 }
@@ -225,117 +225,49 @@ void LegacyConstraintGroup::RemoveConstraint(Constraint *inConstraint)
 	if (std::erase(mConstraints, inConstraint) != 0)
 	{
 		RebuildSolverStorageLayout();
-		InvalidateSolverMetadata();
 	}
 }
 
-void LegacyConstraintGroup::InvalidateSolverMetadata()
+bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *const *inMembers, size_t inMemberCount, float inDeltaTime)
 {
-	mSolverMetadata.store(0, std::memory_order_release);
-}
-
-void LegacyConstraintGroup::RefreshSolverMetadata() const
-{
-	if ((mSolverMetadata.load(std::memory_order_acquire) & cSolverMetadataValid) != 0)
-		return;
-
-	Constraint *representative = nullptr;
-	bool requires_post_contact_solve = false;
-	for (Constraint *constraint : mConstraints)
-		if (constraint->IsActive())
-		{
-			if (representative == nullptr)
-				representative = constraint;
-			if (constraint->RequiresPostContactLegacySolve())
-				requires_post_contact_solve = true;
-			else
-			{
-				requires_post_contact_solve = false;
-				break;
-			}
-		}
-
-	mSolverRepresentative.store(representative, std::memory_order_relaxed);
-	const uint8 metadata = cSolverMetadataValid
-		| (representative != nullptr && requires_post_contact_solve? cRequiresPostContactSolve : 0);
-	mSolverMetadata.store(metadata, std::memory_order_release);
-}
-
-void LegacyConstraintGroup::PrepareVelocitySolve()
-{
-	uint8 prepare_state = mSolverPrepareState.load(std::memory_order_acquire);
-	if (prepare_state == cSolverPrepareReady)
-		return;
-
-	uint8 expected = cSolverPrepareUnprepared;
-	if (mSolverPrepareState.compare_exchange_strong(expected, cSolverPrepareInitializing,
-		std::memory_order_acq_rel, std::memory_order_acquire))
-	{
-		// Body activation and runtime constraint modes can change without changing group
-		// membership. Rebuild this small metadata snapshot once per collision step, after
-		// Jolt has frozen the active-constraint list for that step.
-		InvalidateSolverMetadata();
-		RefreshSolverMetadata();
-		mSolvePending.store(true, std::memory_order_release);
-		mSolverPrepareState.store(cSolverPrepareReady, std::memory_order_release);
-		return;
-	}
-
-	// Setup runs in parallel batches. Only the first member scans the group; other members
-	// wait for that short publication instead of repeating the scan or writing mSolvePending.
-	while (mSolverPrepareState.load(std::memory_order_acquire) == cSolverPrepareInitializing)
-		std::this_thread::yield();
-}
-
-bool LegacyConstraintGroup::IsSolverRepresentative(const Constraint *inCaller) const
-{
-	RefreshSolverMetadata();
-	return mSolverRepresentative.load(std::memory_order_relaxed) == inCaller;
-}
-
-bool LegacyConstraintGroup::RequiresPostContactSolve() const
-{
-	RefreshSolverMetadata();
-	return (mSolverMetadata.load(std::memory_order_relaxed) & cRequiresPostContactSolve) != 0;
-}
-
-bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float inDeltaTime)
-{
-	if (!IsSolverRepresentative(inCaller))
-		return false;
-	if (!mSolvePending.exchange(false, std::memory_order_acq_rel))
-		return false;
-
 	bool appliedImpulse = false;
 	bool groupBroken = false;
-	// RebuildSolverStorageLayout has already packed every Havana work area contiguously. The
-	// backing vector only changes when group membership changes, so the steady-state PSI path does
-	// not allocate, resize or query virtual storage sizes.
+	// Only the current island's dispatcher supplies work. The layout is immutable during
+	// Update and each constraint owns a disjoint storage range. Active lists and break/scan
+	// state are local to this invocation, so disconnected islands can execute concurrently.
 	std::byte *storage_base = reinterpret_cast<std::byte *>(mSolverStorage.data());
-	mActiveSolverEntries.clear();
-	for (size_t index = 0; index < mConstraints.size(); ++index)
+	std::vector<SolverEntry> active_entries;
+	active_entries.reserve(inMemberCount);
+	for (size_t member = 0; member < inMemberCount; ++member)
 	{
-		Constraint *constraint = mConstraints[index];
+		Constraint *constraint = inMembers[member];
+		JPH_ASSERT(constraint->GetLegacyConstraintGroup() == this);
+		const size_t index = constraint->mLegacyGroupIndex;
+		JPH_ASSERT(index < mConstraints.size() && mConstraints[index] == constraint);
 		if (!constraint->IsActive())
 			continue;
 		const size_t storage_offset = mSolverStorageOffsets[index];
 		void *solver_storage = storage_offset == SIZE_MAX? nullptr : storage_base + storage_offset;
-		mActiveSolverEntries.push_back({ constraint, solver_storage, index });
-		if (solver_storage != nullptr)
-			constraint->InitializeLegacySolverStorage(solver_storage);
+		active_entries.push_back({ constraint, solver_storage, index });
 	}
+	// Retain Source insertion order within this island's portion of the local system.
+	std::sort(active_entries.begin(), active_entries.end(), [](const SolverEntry &a, const SolverEntry &b) {
+		return a.mConstraintIndex < b.mConstraintIndex;
+	});
+	for (const SolverEntry &entry : active_entries)
+		if (entry.mStorage != nullptr)
+			entry.mConstraint->InitializeLegacySolverStorage(entry.mStorage);
 	auto destroy_solver_storage = [&]()
 	{
-		for (const SolverEntry &entry : mActiveSolverEntries)
+		for (const SolverEntry &entry : active_entries)
 			if (entry.mStorage != nullptr)
 				entry.mConstraint->DestroyLegacySolverStorage(entry.mStorage);
 	};
 	const bool traceGroupSolves = IsLegacyGroupSolveTraceEnabled();
 	uint32 solveOrdinal = 0;
 	if (traceGroupSolves)
-		std::fprintf(stderr, "LEGACY_GROUP_BEGIN group=%p count=%zu additional=%d caller=%p\n",
-			static_cast<void *>(this), mConstraints.size(), mAdditionalIterations,
-			static_cast<void *>(inCaller));
+		std::fprintf(stderr, "LEGACY_GROUP_BEGIN group=%p island_members=%zu additional=%d\n",
+			static_cast<void *>(this), active_entries.size(), mAdditionalIterations);
 	auto solveConstraint = [&](const SolverEntry &entry, float tauFactor, float dampingFactor,
 		const char *phase, int64 iteration, bool setup)
 	{
@@ -384,12 +316,12 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 	};
 	auto solveForward = [&](float tauFactor, float dampingFactor, int64 iteration)
 	{
-		for (const SolverEntry &entry : mActiveSolverEntries)
+		for (const SolverEntry &entry : active_entries)
 			solveConstraint(entry, tauFactor, dampingFactor, "forward", iteration, false);
 	};
 	auto solveReverse = [&](float tauFactor, float dampingFactor, int64 iteration)
 	{
-		for (auto entry = mActiveSolverEntries.rbegin(); entry != mActiveSolverEntries.rend(); ++entry)
+		for (auto entry = active_entries.rbegin(); entry != active_entries.rend(); ++entry)
 			solveConstraint(*entry, tauFactor, dampingFactor, "reverse", iteration, false);
 	};
 	auto setupAndSolveForward = [&](float tauFactor, float dampingFactor)
@@ -397,7 +329,7 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 		// Havana's setup_and_step_constraint is interleaved per constraint. Do not set up the
 		// complete group first: a later predictive Length constraint must observe velocity impulses
 		// written by an earlier Ragdoll/Fixed setup solve in the same local controller pass.
-		for (const SolverEntry &entry : mActiveSolverEntries)
+		for (const SolverEntry &entry : active_entries)
 		{
 			if (groupBroken)
 				break;
@@ -428,9 +360,7 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *inCaller, float
 		std::fprintf(stderr, "LEGACY_GROUP_END group=%p solves=%u broken=%d\n",
 			static_cast<void *>(this), solveOrdinal, groupBroken ? 1 : 0);
 	destroy_solver_storage();
-	mSolverPrepareState.store(cSolverPrepareUnprepared, std::memory_order_release);
 
-	(void)inCaller;
 	return appliedImpulse;
 }
 

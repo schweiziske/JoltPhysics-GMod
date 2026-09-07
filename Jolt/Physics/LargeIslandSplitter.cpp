@@ -7,6 +7,7 @@
 #include <Jolt/Physics/IslandBuilder.h>
 #include <Jolt/Physics/Constraints/CalculateSolverSteps.h>
 #include <Jolt/Physics/Constraints/Constraint.h>
+#include <Jolt/Physics/Constraints/ConstraintManager.h>
 #include <Jolt/Physics/Constraints/ContactConstraintManager.h>
 #include <Jolt/Physics/Body/BodyManager.h>
 #include <Jolt/Core/Profiler.h>
@@ -183,7 +184,7 @@ LargeIslandSplitter::~LargeIslandSplitter()
 	JPH_ASSERT(mSplitIslands == nullptr);
 }
 
-void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, const ContactConstraintManager &inContactManager, uint32 inNumActiveBodies, TempAllocator *inTempAllocator)
+void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, const ContactConstraintManager &inContactManager, Constraint **inActiveConstraints, uint32 inNumActiveBodies, TempAllocator *inTempAllocator)
 {
 	JPH_PROFILE_FUNCTION();
 
@@ -209,7 +210,10 @@ void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, const Co
 			// in JobSolveVelocityConstraints. Do not reserve a split slot for it: no later
 			// SplitIsland call will create that slot, and FetchNextBatch would otherwise wait
 			// forever for work that cannot appear on the second persistent-contact frame.
-			if (!inContactManager.AreAnyContactIndicesUsingVPhysicsSolver(contacts_start, contacts_end))
+			// Ordered Havana passes need the same controller/contact boundary at every island
+			// size. Do not reserve a native split slot that will never be published.
+			if (!inContactManager.AreAnyContactIndicesUsingVPhysicsSolver(contacts_start, contacts_end)
+				&& !ConstraintManager::sHasLegacyConstraints(inActiveConstraints, constraints_start, constraints_end))
 			{
 				mNumSplitIslands++;
 				mContactAndConstraintsSize += island_size;
@@ -323,7 +327,8 @@ bool LargeIslandSplitter::SplitIsland(uint32 inIslandIndex, const IslandBuilder 
 
 	// Check if it exceeds the threshold
 	uint island_size = num_contacts_in_island + num_constraints_in_island;
-	if (island_size < cLargeIslandTreshold)
+	if (island_size < cLargeIslandTreshold
+		|| ConstraintManager::sHasLegacyConstraints(inActiveConstraints, constraints_start, constraints_end))
 		return false;
 
 	// Get bodies in this island
@@ -344,8 +349,7 @@ bool LargeIslandSplitter::SplitIsland(uint32 inIslandIndex, const IslandBuilder 
 	uint32 *contact_split_idx = mContactAndConstraintsSplitIdx + offset;
 	uint32 *constraint_split_idx = contact_split_idx + num_contacts_in_island;
 
-	// Assign constraints first. LegacyConstraintGroup::BuildIslandSplits marks every
-	// member body as non-parallel; contacts must see that mark before they are colored.
+	// Assign native constraints before contacts so all declared write sets are respected.
 	uint32 *cur_constraint_split_idx = constraint_split_idx;
 	for (const uint32 *c = constraints_start; c < constraints_end; ++c)
 	{
@@ -357,7 +361,7 @@ bool LargeIslandSplitter::SplitIsland(uint32 inIslandIndex, const IslandBuilder 
 		ioStepsCalculator(constraint);
 	}
 
-	// Assign the contacts after all Source local constraint systems have reserved their bodies.
+	// Assign contacts after constraints.
 	uint32 *cur_contact_split_idx = contact_split_idx;
 	for (const uint32 *c = contacts_start; c < contacts_end; ++c)
 	{
