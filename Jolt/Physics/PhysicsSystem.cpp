@@ -1492,18 +1492,15 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					bool last_iteration, final_batch;
 					mLargeIslandSplitter.MarkBatchProcessed(split_island_index, constraints_begin, constraints_end, contacts_begin, contacts_end, last_iteration, final_batch);
 
+					// Restore per-batch publication; there is no whole-island refinement.
+					if (last_iteration)
+						mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
+
 					if (final_batch)
 					{
 						JPH_ASSERT(last_iteration);
 						const uint32 island_idx = mLargeIslandSplitter.GetIslandIndex(split_island_index);
-						mIslandBuilder.GetContactsInIsland(island_idx, contacts_begin, contacts_end);
-						uint velocity_steps = mLargeIslandSplitter.GetNumVelocitySteps(split_island_index);
-						if (!mIslandBuilder.GetConstraintsInIsland(island_idx, constraints_begin, constraints_end))
-							velocity_steps += mContactManager.RefineVelocityConstraints(contacts_begin, contacts_end, velocity_steps);
-						// All velocity batches have retired. Only this worker now owns the
-						// complete island: refine first, then publish each final pressure
-						// exactly once. Per-batch stores would race with the refinement.
-						mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
+						const uint velocity_steps = mLargeIslandSplitter.GetNumVelocitySteps(split_island_index);
 						if (mIslandDebugEnabled)
 							mDebugIslands[island_idx].mVelocitySteps = velocity_steps;
 					#ifdef JPH_TRACK_SIMULATION_STATS
@@ -1584,7 +1581,6 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 
 			// Split up large islands
 			bool is_large_island = true;
-			uint extra_velocity_steps = 0;
 			CalculateSolverSteps steps_calculator(mPhysicsSettings);
 			const bool has_legacy_constraints = ConstraintManager::sHasLegacyConstraints(
 				active_constraints, constraints_begin, constraints_end);
@@ -1719,8 +1715,6 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				}
 				if (has_legacy_friction || has_vphysics_contacts)
 					mContactManager.IntegrateLegacyFrictionState(contacts_begin, contacts_end, delta_time);
-				if (!has_constraints)
-					extra_velocity_steps = mContactManager.RefineVelocityConstraints(contacts_begin, contacts_end, num_velocity_steps);
 
 				// Save back the lambdas in the contact cache for the warm start of the next physics update
 				mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
@@ -1731,14 +1725,14 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				// A split island's final worker owns its final velocity count. It may
 				// already have finished, so the publishing worker must not overwrite it.
 				if (!is_large_island)
-					mDebugIslands[island_idx].mVelocitySteps = steps_calculator.GetNumVelocitySteps() + extra_velocity_steps;
+					mDebugIslands[island_idx].mVelocitySteps = steps_calculator.GetNumVelocitySteps();
 				mDebugIslands[island_idx].mPositionSteps = steps_calculator.GetNumPositionSteps();
 			}
 		#ifdef JPH_TRACK_SIMULATION_STATS
 			uint64 num_ticks = GetProcessorTickCount() - start_tick;
 			IslandBuilder::IslandStats &stats = mIslandBuilder.GetIslandStats(island_idx);
 			if (!is_large_island)
-				stats.mNumVelocitySteps = steps_calculator.GetNumVelocitySteps() + extra_velocity_steps;
+				stats.mNumVelocitySteps = steps_calculator.GetNumVelocitySteps();
 			stats.mNumPositionSteps = (uint8)steps_calculator.GetNumPositionSteps();
 			stats.mVelocityConstraintTicks.fetch_add(num_ticks, memory_order_relaxed);
 			stats.mIsLargeIsland = is_large_island;
@@ -1862,23 +1856,18 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 					float inner_radius = body.GetShape()->GetInnerRadius();
 					JPH_ASSERT(inner_radius > 0.0f, "The shape has no inner radius, this makes the shape unsuitable for the linear cast motion quality as we cannot move it without risking tunneling.");
 
-					// Keep every eligible trajectory until CCD has finished. A slow body
-					// may initially move with a fast thin target and only hit it after
-					// another event stops that target. Integrating the slow body here
-					// would lose the beginning of that relative sweep.
+					// Measure translation in this step and check if it above the threshold to perform a linear cast
 					float linear_cast_threshold_sq = Square(mPhysicsSettings.mLinearCastThreshold * inner_radius);
-					uint32 ccd_body_idx = ioStep->mNumCCDBodies++;
-					JPH_ASSERT(active_body_idx < ioStep->mNumActiveBodyToCCDBody);
-					ioStep->mActiveBodyToCCDBody[active_body_idx] = ccd_body_idx;
-					// A contact manifold only distinguishes planes to mManifoldTolerance.
-					// Requiring a strictly zero CCD gap below that precision turns tiny
-					// resting/rotating contact residuals into fraction-zero hits that
-					// discard tangential travel. Keep the allowance within both the
-					// manifold precision and the shape's existing CCD radius bound.
-					const float ccd_slop = max(mPhysicsSettings.mPenetrationSlop, mPhysicsSettings.mManifoldTolerance);
-					new (&ioStep->mCCDBodies[ccd_body_idx]) CCDBody(body_id, delta_pos, linear_cast_threshold_sq, min(ccd_slop, mPhysicsSettings.mLinearCastMaxPenetration * inner_radius));
+					if (delta_pos.LengthSq() > linear_cast_threshold_sq)
+					{
+						// This body needs a cast
+						uint32 ccd_body_idx = ioStep->mNumCCDBodies++;
+						JPH_ASSERT(active_body_idx < ioStep->mNumActiveBodyToCCDBody);
+						ioStep->mActiveBodyToCCDBody[active_body_idx] = ccd_body_idx;
+						new (&ioStep->mCCDBodies[ccd_body_idx]) CCDBody(body_id, delta_pos, linear_cast_threshold_sq, min(mPhysicsSettings.mPenetrationSlop, mPhysicsSettings.mLinearCastMaxPenetration * inner_radius));
 
-					update_position = false;
+						update_position = false;
+					}
 				}
 				break;
 			}
@@ -1917,83 +1906,15 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 		mBroadPhase->NotifyBodiesAABBChanged(bodies_to_update_bounds, num_bodies_to_update_bounds, false);
 }
 
-inline static PhysicsUpdateContext::Step::CCDBody *sGetCCDBody(const Body &inBody, PhysicsUpdateContext::Step *inStep);
-
-void PhysicsSystem::JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
+void PhysicsSystem::JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep) const
 {
-#ifdef JPH_ENABLE_ASSERTS
-	BodyAccess::Grant grant(BodyAccess::EAccess::Read, BodyAccess::EAccess::ReadWrite);
-#endif
 	// Validate that our reservations were correct
 	JPH_ASSERT(ioStep->mNumCCDBodies <= mBodyManager.GetNumActiveCCDBodies());
 
-	Array<CCDBody *> casts;
-	for (uint32 i = 0; i < ioStep->mNumCCDBodies; ++i)
-		if (ioStep->mCCDBodies[i].mCastRequired)
-			casts.push_back(&ioStep->mCCDBodies[i]);
-	if (!casts.empty())
+	if (ioStep->mNumCCDBodies > 0)
 	{
-		// Rotations and Discrete translations have already been integrated.
-		// Broadphase rejection must use those same transforms.
-		const uint32 count = mBodyManager.GetNumActiveBodies(EBodyType::RigidBody);
-		const BodyID *active = mBodyManager.GetActiveBodiesUnsafe(EBodyType::RigidBody);
-		BodyID batch[64];
-		for (uint32 begin = 0; begin < count; begin += 64)
-		{
-			const uint32 size = min(uint32(64), count - begin);
-			for (uint32 i = 0; i < size; ++i)
-			{
-				batch[i] = active[begin + i];
-				mBodyManager.GetBody(batch[i]).CalculateWorldSpaceBoundsInternal();
-			}
-			mBroadPhase->NotifyBodiesAABBChanged(batch, size, false);
-		}
-		for (uint32 i = 0; i < ioStep->mNumCCDBodies; ++i)
-		{
-			CCDBody &ccd = ioStep->mCCDBodies[i];
-			ioStep->mCCDMinDelta = Vec3::sMin(ioStep->mCCDMinDelta, ccd.mDeltaPosition);
-			ioStep->mCCDMaxDelta = Vec3::sMax(ioStep->mCCDMaxDelta, ccd.mDeltaPosition);
-			ccd.mSweptBounds = mBodyManager.GetBody(ccd.mBodyID1).GetWorldSpaceBounds();
-			ccd.mSweptBounds.mMin += Vec3::sMin(Vec3::sZero(), ccd.mDeltaPosition);
-			ccd.mSweptBounds.mMax += Vec3::sMax(Vec3::sZero(), ccd.mDeltaPosition);
-		}
-		// CCD participation is closed over potentially interacting paths. The
-		// ordinary threshold remains useful for isolated slow motion, but is not
-		// sufficient next to a body that CCD can stop during this same step.
-		class PromoteCCDCollector final : public CastShapeBodyCollector
-		{
-		public:
-			PromoteCCDCollector(PhysicsUpdateContext::Step *inStep, const BodyManager &inBodies, const Body &inBody, const AABox &inSweptBounds, Array<CCDBody *> &ioCasts) :
-				mStep(inStep), mBodies(inBodies), mBody(inBody), mSweptBounds(inSweptBounds), mCasts(ioCasts) { }
-			void AddHit(const BroadPhaseCastResult &inResult) override
-			{
-				const Body &other = mBodies.GetBody(inResult.mBodyID);
-				CCDBody *ccd = sGetCCDBody(other, mStep);
-				if (ccd != nullptr && !ccd->mCastRequired && mSweptBounds.Overlaps(ccd->mSweptBounds)
-					&& mBody.GetCollisionGroup().CanCollide(other.GetCollisionGroup()))
-				{
-					ccd->mCastRequired = true;
-					mCasts.push_back(ccd);
-				}
-			}
-			PhysicsUpdateContext::Step *mStep;
-			const BodyManager &mBodies;
-			const Body &mBody;
-			const AABox &mSweptBounds;
-			Array<CCDBody *> &mCasts;
-		};
-		for (size_t i = 0; i < casts.size(); ++i)
-		{
-			const CCDBody &ccd = *casts[i];
-			const Body &body = mBodyManager.GetBody(ccd.mBodyID1);
-			AABox bounds = ccd.mSweptBounds;
-			bounds.mMin -= ioStep->mCCDMaxDelta;
-			bounds.mMax -= ioStep->mCCDMinDelta;
-			PromoteCCDCollector collector(ioStep, mBodyManager, body, ccd.mSweptBounds, casts);
-			mBroadPhase->CastAABoxNoLock({ bounds, Vec3::sZero() }, collector, GetDefaultBroadPhaseLayerFilter(body.GetObjectLayer()), GetDefaultLayerFilter(body.GetObjectLayer()));
-		}
 		// Run the continuous collision detection jobs
-		int num_continuous_collision_jobs = min(int(casts.size() + cNumCCDBodiesPerJob - 1) / cNumCCDBodiesPerJob, ioContext->GetMaxConcurrency());
+		int num_continuous_collision_jobs = min(int(ioStep->mNumCCDBodies + cNumCCDBodiesPerJob - 1) / cNumCCDBodiesPerJob, ioContext->GetMaxConcurrency());
 		ioStep->mResolveCCDContacts.AddDependency(num_continuous_collision_jobs);
 		for (int i = 0; i < num_continuous_collision_jobs; ++i)
 		{
@@ -2006,6 +1927,17 @@ void PhysicsSystem::JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, Ph
 			ioContext->mBarrier->AddJob(job);
 		}
 	}
+}
+
+// Helper function to calculate the motion of a body during this CCD step
+inline static Vec3 sCalculateBodyMotion(const Body &inBody, float inDeltaTime)
+{
+	// If the body is linear casting, the body has not yet moved so we need to calculate its motion
+	if (inBody.IsDynamic() && inBody.GetMotionProperties()->GetMotionQuality() == EMotionQuality::LinearCast)
+		return inDeltaTime * inBody.GetLinearVelocity();
+
+	// Body has already moved, so we don't need to correct for anything
+	return Vec3::sZero();
 }
 
 // Helper function that finds the CCD body corresponding to a body (if it exists)
@@ -2039,23 +1971,13 @@ inline static PhysicsUpdateContext::Step::CCDBody *sGetCCDBody(const Body &inBod
 void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
 {
 #ifdef JPH_ENABLE_ASSERTS
+	// We only read positions, but the validate callback may read body positions and velocities
 	BodyAccess::Grant grant(BodyAccess::EAccess::Read, BodyAccess::EAccess::Read);
 #endif
-	for (;;)
-	{
-		const uint32 index = ioStep->mNextCCDBody++;
-		if (index >= ioStep->mNumCCDBodies) break;
-		if (ioStep->mCCDBodies[index].mCastRequired)
-			FindCCDContact(ioContext, ioStep, ioStep->mCCDBodies[index]);
-	}
-}
 
-void PhysicsSystem::FindCCDContact(const PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep, CCDBody &ccd_body,
-	const Array<SubShapeIDPair> *inIgnoredContacts, ContactManifold *outManifold)
-{
-	ccd_body.mBodyID2 = BodyID();
-	ccd_body.mFraction = ccd_body.mFractionPlusSlop = 1.0f;
-	ccd_body.mContactSettings = ContactSettings();
+	// Allocation context for allocating new contact points
+	ContactAllocator contact_allocator(mContactManager.GetContactAllocator());
+
 	// Settings
 	ShapeCastSettings settings;
 	settings.mUseShrunkenShapeAndConvexRadius = true;
@@ -2065,300 +1987,323 @@ void PhysicsSystem::FindCCDContact(const PhysicsUpdateContext *ioContext, Physic
 	settings.mCollectFacesMode = ECollectFacesMode::CollectFaces;
 	settings.mActiveEdgeMode = mPhysicsSettings.mCheckActiveEdges? EActiveEdgeMode::CollideOnlyWithActive : EActiveEdgeMode::CollideWithAll;
 
-	const Body &body = mBodyManager.GetBody(ccd_body.mBodyID1);
-
-	// Filter out layers
-	DefaultBroadPhaseLayerFilter broadphase_layer_filter = GetDefaultBroadPhaseLayerFilter(body.GetObjectLayer());
-	DefaultObjectLayerFilter object_layer_filter = GetDefaultLayerFilter(body.GetObjectLayer());
-
-#ifdef JPH_DEBUG_RENDERER
-	// Draw start and end shape of cast
-	if (sDrawMotionQualityLinearCast)
+	for (;;)
 	{
-		RMat44 com = body.GetCenterOfMassTransform();
-		body.GetShape()->Draw(DebugRenderer::sInstance, com, Vec3::sOne(), Color::sGreen, false, true);
-		DebugRenderer::sInstance->DrawArrow(com.GetTranslation(), com.GetTranslation() + ccd_body.mDeltaPosition, Color::sGreen, 0.1f);
-		body.GetShape()->Draw(DebugRenderer::sInstance, com.PostTranslated(ccd_body.mDeltaPosition), Vec3::sOne(), Color::sRed, false, true);
-	}
-#endif // JPH_DEBUG_RENDERER
+		// Fetch the next body to cast
+		uint32 idx = ioStep->mNextCCDBody++;
+		if (idx >= ioStep->mNumCCDBodies)
+			break;
+		CCDBody &ccd_body = ioStep->mCCDBodies[idx];
+		const Body &body = mBodyManager.GetBody(ccd_body.mBodyID1);
 
-	// Create a collector that will find the maximum distance allowed to travel while not penetrating more than 'max penetration'
-	class CCDNarrowPhaseCollector : public CastShapeCollector
-	{
-	public:
-									CCDNarrowPhaseCollector(const BodyManager &inBodyManager, ContactConstraintManager &inContactConstraintManager, SoftBodyContactListener *inSoftBodyContactListener, CCDBody &inCCDBody, ShapeCastResult &inResult, const Array<SubShapeIDPair> *inIgnoredContacts) :
-			mBodyManager(inBodyManager),
-			mContactConstraintManager(inContactConstraintManager),
-			mSoftBodyContactListener(inSoftBodyContactListener),
-			mCCDBody(inCCDBody),
-			mResult(inResult),
-			mIgnoredContacts(inIgnoredContacts)
+		// Filter out layers
+		DefaultBroadPhaseLayerFilter broadphase_layer_filter = GetDefaultBroadPhaseLayerFilter(body.GetObjectLayer());
+		DefaultObjectLayerFilter object_layer_filter = GetDefaultLayerFilter(body.GetObjectLayer());
+
+	#ifdef JPH_DEBUG_RENDERER
+		// Draw start and end shape of cast
+		if (sDrawMotionQualityLinearCast)
 		{
+			RMat44 com = body.GetCenterOfMassTransform();
+			body.GetShape()->Draw(DebugRenderer::sInstance, com, Vec3::sOne(), Color::sGreen, false, true);
+			DebugRenderer::sInstance->DrawArrow(com.GetTranslation(), com.GetTranslation() + ccd_body.mDeltaPosition, Color::sGreen, 0.1f);
+			body.GetShape()->Draw(DebugRenderer::sInstance, com.PostTranslated(ccd_body.mDeltaPosition), Vec3::sOne(), Color::sRed, false, true);
 		}
+	#endif // JPH_DEBUG_RENDERER
 
-		virtual void				AddHit(const ShapeCastResult &inResult) override
+		// Create a collector that will find the maximum distance allowed to travel while not penetrating more than 'max penetration'
+		class CCDNarrowPhaseCollector : public CastShapeCollector
 		{
-			JPH_PROFILE_FUNCTION();
-			if (mIgnoredContacts != nullptr)
+		public:
+										CCDNarrowPhaseCollector(const BodyManager &inBodyManager, ContactConstraintManager &inContactConstraintManager, SoftBodyContactListener *inSoftBodyContactListener, CCDBody &inCCDBody, ShapeCastResult &inResult, float inDeltaTime) :
+				mBodyManager(inBodyManager),
+				mContactConstraintManager(inContactConstraintManager),
+				mSoftBodyContactListener(inSoftBodyContactListener),
+				mCCDBody(inCCDBody),
+				mResult(inResult),
+				mDeltaTime(inDeltaTime)
 			{
-				const SubShapeIDPair key = mCCDBody.mBodyID1 < inResult.mBodyID2
-					? SubShapeIDPair(mCCDBody.mBodyID1, inResult.mSubShapeID1, inResult.mBodyID2, inResult.mSubShapeID2)
-					: SubShapeIDPair(inResult.mBodyID2, inResult.mSubShapeID2, mCCDBody.mBodyID1, inResult.mSubShapeID1);
-				if (std::find(mIgnoredContacts->begin(), mIgnoredContacts->end(), key) != mIgnoredContacts->end()) return;
 			}
 
-			// Check if this is a possible earlier hit than the one before
-			float fraction = mSegmentStart + inResult.mFraction * mSegmentDuration;
-			if (fraction < mCCDBody.mFractionPlusSlop)
+			virtual void				AddHit(const ShapeCastResult &inResult) override
 			{
-				// Normalize normal
-				Vec3 normal = inResult.mPenetrationAxis.Normalized();
+				JPH_PROFILE_FUNCTION();
 
-				// Calculate how much we can add to the fraction to penetrate the collision point by mMaxPenetration.
-				// Note that the normal is pointing towards body 2!
-				// Let the extra distance that we can travel along delta_pos be 'dist': mMaxPenetration / dist = cos(angle between normal and delta_pos) = normal . delta_pos / |delta_pos|
-				// <=> dist = mMaxPenetration * |delta_pos| / normal . delta_pos
-				// Converting to a faction: delta_fraction = dist / |delta_pos| = mLinearCastTreshold / normal . delta_pos
-				float denominator = normal.Dot(mRelativeDirection);
-				if (denominator > mCCDBody.mMaxPenetration) // Avoid dividing by zero, if extra hit fraction > 1 there's also no point in continuing
+				// Check if this is a possible earlier hit than the one before
+				float fraction = inResult.mFraction;
+				if (fraction < mCCDBody.mFractionPlusSlop)
 				{
-					float fraction_plus_slop = fraction + mSegmentDuration * mCCDBody.mMaxPenetration / denominator;
-					if (fraction_plus_slop < mCCDBody.mFractionPlusSlop)
+					// Normalize normal
+					Vec3 normal = inResult.mPenetrationAxis.Normalized();
+
+					// Calculate how much we can add to the fraction to penetrate the collision point by mMaxPenetration.
+					// Note that the normal is pointing towards body 2!
+					// Let the extra distance that we can travel along delta_pos be 'dist': mMaxPenetration / dist = cos(angle between normal and delta_pos) = normal . delta_pos / |delta_pos|
+					// <=> dist = mMaxPenetration * |delta_pos| / normal . delta_pos
+					// Converting to a faction: delta_fraction = dist / |delta_pos| = mLinearCastTreshold / normal . delta_pos
+					float denominator = normal.Dot(mCCDBody.mDeltaPosition);
+					if (denominator > mCCDBody.mMaxPenetration) // Avoid dividing by zero, if extra hit fraction > 1 there's also no point in continuing
 					{
-						const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
-
-						// Check if we've already accepted all hits from this body
-						if (mValidateBodyPair)
+						float fraction_plus_slop = fraction + mCCDBody.mMaxPenetration / denominator;
+						if (fraction_plus_slop < mCCDBody.mFractionPlusSlop)
 						{
-							// Validate the contact result
-							const Body &body1 = mBodyManager.GetBody(mCCDBody.mBodyID1);
-							if (body2.IsRigidBody())
+							const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
+
+							// Check if we've already accepted all hits from this body
+							if (mValidateBodyPair)
 							{
-								ValidateResult validate_result = mContactConstraintManager.ValidateContactPoint(body1, body2, body1.GetCenterOfMassPosition(), inResult); // Note that the center of mass of body 1 is the start of the sweep and is used as base offset below
-								switch (validate_result)
+								// Validate the contact result
+								const Body &body1 = mBodyManager.GetBody(mCCDBody.mBodyID1);
+								if (body2.IsRigidBody())
 								{
-								case ValidateResult::AcceptContact:
-									// Just continue
-									break;
+									ValidateResult validate_result = mContactConstraintManager.ValidateContactPoint(body1, body2, body1.GetCenterOfMassPosition(), inResult); // Note that the center of mass of body 1 is the start of the sweep and is used as base offset below
+									switch (validate_result)
+									{
+									case ValidateResult::AcceptContact:
+										// Just continue
+										break;
 
-								case ValidateResult::AcceptAllContactsForThisBodyPair:
-									// Accept this and all following contacts from this body
-									mValidateBodyPair = false;
-									break;
+									case ValidateResult::AcceptAllContactsForThisBodyPair:
+										// Accept this and all following contacts from this body
+										mValidateBodyPair = false;
+										break;
 
-								case ValidateResult::RejectContact:
-									return;
+									case ValidateResult::RejectContact:
+										return;
 
-								case ValidateResult::RejectAllContactsForThisBodyPair:
-									// Reject this and all following contacts from this body
-									mRejectAll = true;
-									ForceEarlyOut();
-									return;
-								}
-							}
-							else
-							{
-								SoftBodyContactSettings sb_settings;
-								sb_settings.mIsSensor = false;
-								if ((mSoftBodyContactListener == nullptr
-									|| mSoftBodyContactListener->OnSoftBodyContactValidate(body2, body1, sb_settings) == SoftBodyValidateResult::AcceptContact) // Note reversal, soft body needs to be first parameter
-									&& !sb_settings.mIsSensor) // If the contact listener turned this into a sensor, we want to ignore it
-								{
-									// Convert the soft body contact settings (note bodies are swapped)
-									mCCDBody.mContactSettings.mInvMassScale1 = sb_settings.mInvMassScale2;
-									mCCDBody.mContactSettings.mInvMassScale2 = sb_settings.mInvMassScale1;
-									mCCDBody.mContactSettings.mInvInertiaScale1 = sb_settings.mInvInertiaScale2;
-
-									// Accept this and all following contacts from this body
-									mValidateBodyPair = false;
+									case ValidateResult::RejectAllContactsForThisBodyPair:
+										// Reject this and all following contacts from this body
+										mRejectAll = true;
+										ForceEarlyOut();
+										return;
+									}
 								}
 								else
 								{
-									// Reject this and all following contacts from this body
-									mRejectAll = true;
-									ForceEarlyOut();
-									return;
+									SoftBodyContactSettings sb_settings;
+									sb_settings.mIsSensor = false;
+									if ((mSoftBodyContactListener == nullptr
+										|| mSoftBodyContactListener->OnSoftBodyContactValidate(body2, body1, sb_settings) == SoftBodyValidateResult::AcceptContact) // Note reversal, soft body needs to be first parameter
+										&& !sb_settings.mIsSensor) // If the contact listener turned this into a sensor, we want to ignore it
+									{
+										// Convert the soft body contact settings (note bodies are swapped)
+										mCCDBody.mContactSettings.mInvMassScale1 = sb_settings.mInvMassScale2;
+										mCCDBody.mContactSettings.mInvMassScale2 = sb_settings.mInvMassScale1;
+										mCCDBody.mContactSettings.mInvInertiaScale1 = sb_settings.mInvInertiaScale2;
+
+										// Accept this and all following contacts from this body
+										mValidateBodyPair = false;
+									}
+									else
+									{
+										// Reject this and all following contacts from this body
+										mRejectAll = true;
+										ForceEarlyOut();
+										return;
+									}
 								}
 							}
+
+							// This is the earliest hit so far, store it
+							mCCDBody.mContactNormal = normal;
+							mCCDBody.mBodyID2 = inResult.mBodyID2;
+							mCCDBody.mSubShapeID2 = inResult.mSubShapeID2;
+							mCCDBody.mSubShapeID1 = inResult.mSubShapeID1;
+							mCCDBody.mFraction = fraction;
+							mCCDBody.mFractionPlusSlop = fraction_plus_slop;
+							mResult = inResult;
+
+							// Result was assuming body 2 is not moving, but it is, so we need to correct for it
+							Vec3 movement2 = fraction * sCalculateBodyMotion(body2, mDeltaTime);
+							if (!movement2.IsNearZero())
+							{
+								mResult.mContactPointOn1 += movement2;
+								mResult.mContactPointOn2 += movement2;
+								for (Vec3 &v : mResult.mShape1Face)
+									v += movement2;
+								for (Vec3 &v : mResult.mShape2Face)
+									v += movement2;
+							}
+
+							// Update early out fraction
+							UpdateEarlyOutFraction(fraction_plus_slop);
 						}
-
-						// This is the earliest hit so far, store it
-						mCCDBody.mContactNormal = normal;
-						mCCDBody.mBodyID2 = inResult.mBodyID2;
-						mCCDBody.mSubShapeID2 = inResult.mSubShapeID2;
-						mCCDBody.mSubShapeID1 = inResult.mSubShapeID1;
-						mCCDBody.mFraction = fraction;
-						mCCDBody.mFractionPlusSlop = fraction_plus_slop;
-						mResult = inResult;
-						mResult.mFraction = fraction;
-
-						// Result was assuming body 2 is not moving, but it is, so we need to correct for it
-						Vec3 movement2 = mOtherOffset + inResult.mFraction * mOtherDelta;
-						if (!movement2.IsNearZero())
-						{
-							mResult.mContactPointOn1 += movement2;
-							mResult.mContactPointOn2 += movement2;
-							for (Vec3 &v : mResult.mShape1Face)
-								v += movement2;
-							for (Vec3 &v : mResult.mShape2Face)
-								v += movement2;
-						}
-
-						// Update early out fraction
-						UpdateEarlyOutFraction((fraction_plus_slop - mSegmentStart) / mSegmentDuration);
 					}
 				}
 			}
-		}
 
-		bool						mValidateBodyPair = true;			///< If we still have to call the ValidateContactPoint for this body pair
-		bool						mRejectAll = false;					///< Reject all further contacts between this body pair
-		Vec3						mRelativeDirection, mOtherOffset, mOtherDelta;
-		float						mSegmentStart = 0.0f, mSegmentDuration = 1.0f;
+			bool						mValidateBodyPair = true;			///< If we still have to call the ValidateContactPoint for this body pair
+			bool						mRejectAll = false;					///< Reject all further contacts between this body pair
 
-	private:
-		const BodyManager &			mBodyManager;
-		ContactConstraintManager &	mContactConstraintManager;
-		SoftBodyContactListener *	mSoftBodyContactListener;
-		CCDBody &					mCCDBody;
-		ShapeCastResult &			mResult;
-		const Array<SubShapeIDPair> *mIgnoredContacts;
-	};
+		private:
+			const BodyManager &			mBodyManager;
+			ContactConstraintManager &	mContactConstraintManager;
+			SoftBodyContactListener *	mSoftBodyContactListener;
+			CCDBody &					mCCDBody;
+			ShapeCastResult &			mResult;
+			float						mDeltaTime;
+		};
 
-	// Narrowphase collector
-	ShapeCastResult cast_shape_result;
-	CCDNarrowPhaseCollector np_collector(mBodyManager, mContactManager, mSoftBodyContactListener, ccd_body, cast_shape_result, inIgnoredContacts);
+		// Narrowphase collector
+		ShapeCastResult cast_shape_result;
+		CCDNarrowPhaseCollector np_collector(mBodyManager, mContactManager, mSoftBodyContactListener, ccd_body, cast_shape_result, ioContext->mStepDeltaTime);
 
-	// This collector wraps the narrowphase collector and collects the closest hit
-	class CCDBroadPhaseCollector : public CastShapeBodyCollector
-	{
-	public:
-									CCDBroadPhaseCollector(const CCDBody &inCCDBody, const Body &inBody1, const RShapeCast &inShapeCast, ShapeCastSettings &inShapeCastSettings, SimShapeFilterWrapper &inShapeFilter, CCDNarrowPhaseCollector &ioCollector, const BodyManager &inBodyManager, PhysicsUpdateContext::Step *inStep, float inDeltaTime) :
-			mCCDBody(inCCDBody),
-			mBody1(inBody1),
-			mBody1Extent(inShapeCast.mShapeWorldBounds.GetExtent()),
-			mShapeCast(inShapeCast),
-			mShapeCastSettings(inShapeCastSettings),
-			mShapeFilter(inShapeFilter),
-			mCollector(ioCollector),
-			mBodyManager(inBodyManager),
-			mStep(inStep),
-			mDeltaTime(inDeltaTime)
+		// This collector wraps the narrowphase collector and collects the closest hit
+		class CCDBroadPhaseCollector : public CastShapeBodyCollector
 		{
-		}
-
-		virtual void				AddHit(const BroadPhaseCastResult &inResult) override
-		{
-			JPH_PROFILE_FUNCTION();
-
-			JPH_ASSERT(inResult.mFraction <= GetEarlyOutFraction(), "This hit should not have been passed on to the collector");
-
-			// Test if we're colliding with ourselves
-			if (mBody1.GetID() == inResult.mBodyID)
-				return;
-
-			const Body &body2 = mBodyManager.GetBody(inResult.mBodyID);
-			const CCDBody *ccd_body2 = sGetCCDBody(body2, mStep);
-			if (!mBody1.GetCollisionGroup().CanCollide(body2.GetCollisionGroup()) || body2.IsSensor()) return;
-
-			// Participating bodies (including slow bodies near a CCD path) follow
-			// a prefix of their original trajectory, then stay where CCD stopped them.
-			const Vec3 delta2 = ccd_body2 != nullptr ? ccd_body2->mDeltaPosition : Vec3::sZero();
-			const float stop2 = ccd_body2 != nullptr ? ccd_body2->mMotionFraction : 0.0f;
-			mCollector.mValidateBodyPair = true;
-			mCollector.mRejectAll = false;
-			mShapeFilter.SetBody2(&body2);
-			AABox bounds = body2.GetWorldSpaceBounds();
-			bounds.mMin -= mBody1Extent;
-			bounds.mMax += mBody1Extent;
-			for (int segment = 0; segment < 2; ++segment)
+		public:
+										CCDBroadPhaseCollector(const CCDBody &inCCDBody, const Body &inBody1, const RShapeCast &inShapeCast, ShapeCastSettings &inShapeCastSettings, SimShapeFilterWrapper &inShapeFilter, CCDNarrowPhaseCollector &ioCollector, const BodyManager &inBodyManager, PhysicsUpdateContext::Step *inStep, float inDeltaTime) :
+				mCCDBody(inCCDBody),
+				mBody1(inBody1),
+				mBody1Extent(inShapeCast.mShapeWorldBounds.GetExtent()),
+				mShapeCast(inShapeCast),
+				mShapeCastSettings(inShapeCastSettings),
+				mShapeFilter(inShapeFilter),
+				mCollector(ioCollector),
+				mBodyManager(inBodyManager),
+				mStep(inStep),
+				mDeltaTime(inDeltaTime)
 			{
-				const float start = segment == 0 ? 0.0f : stop2;
-				const float duration = segment == 0 ? stop2 : 1.0f - stop2;
-				if (duration <= 0.0f || start > GetPositiveEarlyOutFraction()) continue;
-				const Vec3 other_offset = segment == 0 ? Vec3::sZero() : stop2 * delta2;
-				const Vec3 other_delta = segment == 0 ? duration * delta2 : Vec3::sZero();
-				const Vec3 direction = duration * mShapeCast.mDirection - other_delta;
-				if (direction.LengthSq() < 1.0e-20f) continue;
-				const RMat44 transform = mShapeCast.mCenterOfMassStart.PostTranslated(start * mShapeCast.mDirection - other_offset);
-				const float early_out = (GetPositiveEarlyOutFraction() - start) / duration;
-				const float hit_fraction = RayAABox(mShapeCast.mShapeWorldBounds.GetCenter() + Vec3(transform.GetTranslation() - mShapeCast.mCenterOfMassStart.GetTranslation()), RayInvDirection(direction), bounds.mMin, bounds.mMax);
-				if (hit_fraction > early_out) continue;
-				mCollector.ResetEarlyOutFraction(early_out);
-				mCollector.mSegmentStart = start;
-				mCollector.mSegmentDuration = duration;
-				mCollector.mRelativeDirection = direction;
-				mCollector.mOtherOffset = other_offset;
-				mCollector.mOtherDelta = other_delta;
-				mShapeCastSettings.mActiveEdgeMovementDirection = direction;
-				RShapeCast relative_cast(mShapeCast.mShape, mShapeCast.mScale, transform, direction);
-				body2.GetTransformedShape().CastShape(relative_cast, mShapeCastSettings, mShapeCast.mCenterOfMassStart.GetTranslation(), mCollector, mShapeFilter.GetFilter());
-				if (mCollector.mRejectAll) break;
-				UpdateEarlyOutFraction(mCCDBody.mFractionPlusSlop);
 			}
 
-		}
+			virtual void				AddHit(const BroadPhaseCastResult &inResult) override
+			{
+				JPH_PROFILE_FUNCTION();
 
-		const CCDBody &				mCCDBody;
-		const Body &				mBody1;
-		Vec3						mBody1Extent;
-		RShapeCast					mShapeCast;
-		ShapeCastSettings &			mShapeCastSettings;
-		SimShapeFilterWrapper &		mShapeFilter;
-		CCDNarrowPhaseCollector &	mCollector;
-		const BodyManager &			mBodyManager;
-		PhysicsUpdateContext::Step *mStep;
-		float						mDeltaTime;
-	};
+				JPH_ASSERT(inResult.mFraction <= GetEarlyOutFraction(), "This hit should not have been passed on to the collector");
 
-	// Create shape filter
-	SimShapeFilterWrapper shape_filter(mSimShapeFilter, &body);
+				// Test if we're colliding with ourselves
+				if (mBody1.GetID() == inResult.mBodyID)
+					return;
 
-#ifdef JPH_TRACK_SIMULATION_STATS
-	uint64 start_tick = GetProcessorTickCount();
-#endif
+				// Avoid treating duplicates, if both bodies are doing CCD then only consider collision if body ID < other body ID
+				const Body &body2 = mBodyManager.GetBody(inResult.mBodyID);
+				const CCDBody *ccd_body2 = sGetCCDBody(body2, mStep);
+				if (ccd_body2 != nullptr && mCCDBody.mBodyID1 > ccd_body2->mBodyID1)
+					return;
 
-	// Check if we collide with any other body. Note that we use the non-locking interface as we know the broadphase cannot be modified at this point.
-	RShapeCast shape_cast(body.GetShape(), Vec3::sOne(), body.GetCenterOfMassTransform(), ccd_body.mDeltaPosition);
-	CCDBroadPhaseCollector bp_collector(ccd_body, body, shape_cast, settings, shape_filter, np_collector, mBodyManager, ioStep, ioContext->mStepDeltaTime);
-	// A target can sweep into this path even when its starting AABB is
-	// outside our own sweep. Expand by all possible target translations;
-	// narrowphase still uses the exact pair-relative trajectory.
-	AABox query_bounds = shape_cast.mShapeWorldBounds;
-	query_bounds.mMin -= ioStep->mCCDMaxDelta;
-	query_bounds.mMax -= ioStep->mCCDMinDelta;
-	mBroadPhase->CastAABoxNoLock({ query_bounds, shape_cast.mDirection }, bp_collector, broadphase_layer_filter, object_layer_filter);
+				// Test group filter
+				if (!mBody1.GetCollisionGroup().CanCollide(body2.GetCollisionGroup()))
+					return;
 
-#ifdef JPH_TRACK_SIMULATION_STATS
-	uint64 num_ticks = GetProcessorTickCount() - start_tick;
-	const_cast<MotionProperties::SimulationStats &>(body.GetMotionPropertiesUnchecked()->GetSimulationStats()).mCCDTicks.fetch_add(num_ticks, memory_order_relaxed);
-#endif
+				// TODO: For now we ignore sensors
+				if (body2.IsSensor())
+					return;
 
-	// Check if there was a hit
-	if (ccd_body.mFractionPlusSlop < 1.0f)
-	{
-		// Determine contact manifold
-		ContactManifold manifold;
-		manifold.mBaseOffset = shape_cast.mCenterOfMassStart.GetTranslation();
-		ManifoldBetweenTwoFaces(cast_shape_result.mContactPointOn1, cast_shape_result.mContactPointOn2, cast_shape_result.mPenetrationAxis, mPhysicsSettings.mManifoldTolerance, cast_shape_result.mShape1Face, cast_shape_result.mShape2Face, manifold.mRelativeContactPointsOn1, manifold.mRelativeContactPointsOn2 JPH_IF_DEBUG_RENDERER(, manifold.mBaseOffset));
-		manifold.mSubShapeID1 = cast_shape_result.mSubShapeID1;
-		manifold.mSubShapeID2 = cast_shape_result.mSubShapeID2;
-		manifold.mPenetrationDepth = cast_shape_result.mPenetrationDepth;
-		manifold.mWorldSpaceNormal = ccd_body.mContactNormal;
+				// Get relative movement of these two bodies
+				Vec3 direction = mShapeCast.mDirection - sCalculateBodyMotion(body2, mDeltaTime);
 
-		if (outManifold != nullptr) *outManifold = manifold;
-		// Calculate the average position from the manifold (this will result in the same impulse applied as when we apply impulses to all contact points)
-		if (manifold.mRelativeContactPointsOn2.size() > 1)
+				// Test if the remaining movement is less than our movement threshold
+				if (direction.LengthSq() < mCCDBody.mLinearCastThresholdSq)
+					return;
+
+				// Get the bounds of 2, widen it by the extent of 1 and test a ray to see if it hits earlier than the current early out fraction
+				AABox bounds = body2.GetWorldSpaceBounds();
+				bounds.mMin -= mBody1Extent;
+				bounds.mMax += mBody1Extent;
+				float hit_fraction = RayAABox(Vec3(mShapeCast.mCenterOfMassStart.GetTranslation()), RayInvDirection(direction), bounds.mMin, bounds.mMax);
+				if (hit_fraction > GetPositiveEarlyOutFraction()) // If early out fraction <= 0, we have the possibility of finding a deeper hit so we need to clamp the early out fraction
+					return;
+
+				// Reset collector (this is a new body pair)
+				mCollector.ResetEarlyOutFraction(GetEarlyOutFraction());
+				mCollector.mValidateBodyPair = true;
+				mCollector.mRejectAll = false;
+
+				// Set body ID on shape filter
+				mShapeFilter.SetBody2(&body2);
+
+				// Provide direction as hint for the active edges algorithm
+				mShapeCastSettings.mActiveEdgeMovementDirection = direction;
+
+				// Do narrow phase collision check
+				RShapeCast relative_cast(mShapeCast.mShape, mShapeCast.mScale, mShapeCast.mCenterOfMassStart, direction, mShapeCast.mShapeWorldBounds);
+				body2.GetTransformedShape().CastShape(relative_cast, mShapeCastSettings, mShapeCast.mCenterOfMassStart.GetTranslation(), mCollector, mShapeFilter.GetFilter());
+
+				// Update early out fraction based on narrow phase collector
+				if (!mCollector.mRejectAll)
+					UpdateEarlyOutFraction(mCollector.GetEarlyOutFraction());
+			}
+
+			const CCDBody &				mCCDBody;
+			const Body &				mBody1;
+			Vec3						mBody1Extent;
+			RShapeCast					mShapeCast;
+			ShapeCastSettings &			mShapeCastSettings;
+			SimShapeFilterWrapper &		mShapeFilter;
+			CCDNarrowPhaseCollector &	mCollector;
+			const BodyManager &			mBodyManager;
+			PhysicsUpdateContext::Step *mStep;
+			float						mDeltaTime;
+		};
+
+		// Create shape filter
+		SimShapeFilterWrapper shape_filter(mSimShapeFilter, &body);
+
+	#ifdef JPH_TRACK_SIMULATION_STATS
+		uint64 start_tick = GetProcessorTickCount();
+	#endif
+
+		// Check if we collide with any other body. Note that we use the non-locking interface as we know the broadphase cannot be modified at this point.
+		RShapeCast shape_cast(body.GetShape(), Vec3::sOne(), body.GetCenterOfMassTransform(), ccd_body.mDeltaPosition);
+		CCDBroadPhaseCollector bp_collector(ccd_body, body, shape_cast, settings, shape_filter, np_collector, mBodyManager, ioStep, ioContext->mStepDeltaTime);
+		mBroadPhase->CastAABoxNoLock({ shape_cast.mShapeWorldBounds, shape_cast.mDirection }, bp_collector, broadphase_layer_filter, object_layer_filter);
+
+	#ifdef JPH_TRACK_SIMULATION_STATS
+		uint64 num_ticks = GetProcessorTickCount() - start_tick;
+		const_cast<MotionProperties::SimulationStats &>(body.GetMotionPropertiesUnchecked()->GetSimulationStats()).mCCDTicks.fetch_add(num_ticks, memory_order_relaxed);
+	#endif
+
+		// Check if there was a hit
+		if (ccd_body.mFractionPlusSlop < 1.0f)
 		{
-			Vec3 average_contact_point = Vec3::sZero();
-			for (const Vec3 &v : manifold.mRelativeContactPointsOn2)
-				average_contact_point += v;
-			average_contact_point /= (float)manifold.mRelativeContactPointsOn2.size();
-			ccd_body.mContactPointOn2 = manifold.mBaseOffset + average_contact_point;
+			const Body &body2 = mBodyManager.GetBody(ccd_body.mBodyID2);
+
+			// Determine contact manifold
+			ContactManifold manifold;
+			manifold.mBaseOffset = shape_cast.mCenterOfMassStart.GetTranslation();
+			ManifoldBetweenTwoFaces(cast_shape_result.mContactPointOn1, cast_shape_result.mContactPointOn2, cast_shape_result.mPenetrationAxis, mPhysicsSettings.mManifoldTolerance, cast_shape_result.mShape1Face, cast_shape_result.mShape2Face, manifold.mRelativeContactPointsOn1, manifold.mRelativeContactPointsOn2 JPH_IF_DEBUG_RENDERER(, manifold.mBaseOffset));
+			manifold.mSubShapeID1 = cast_shape_result.mSubShapeID1;
+			manifold.mSubShapeID2 = cast_shape_result.mSubShapeID2;
+			manifold.mPenetrationDepth = cast_shape_result.mPenetrationDepth;
+			manifold.mWorldSpaceNormal = ccd_body.mContactNormal;
+
+			// Call contact point callbacks
+			if (body2.IsRigidBody())
+				mContactManager.OnCCDContactAdded(contact_allocator, body, body2, manifold, ccd_body.mContactSettings);
+			else
+			{
+				// We already have mass and inertia scale from the OnSoftBodyContactValidate callback, but we need to fill in the rest of the contact settings
+				ccd_body.mContactSettings.mCombinedFriction = 0.0f; // Soft bodies CCD contacts don't apply friction
+				ccd_body.mContactSettings.mCombinedRestitution = mContactManager.GetCombineRestitution()(body, SubShapeID(), body2, SubShapeID()); // Soft bodies don't pass sub shape IDs because the restitution is uniform across the entire body
+				ccd_body.mContactSettings.mIsSensor = false; // We've filtered out sensors already
+			}
+
+			if (ccd_body.mContactSettings.mIsSensor)
+			{
+				// If this is a sensor, we don't want to solve the contact
+				ccd_body.mFractionPlusSlop = 1.0f;
+				ccd_body.mBodyID2 = BodyID();
+			}
+			else
+			{
+				// Calculate the average position from the manifold (this will result in the same impulse applied as when we apply impulses to all contact points)
+				if (manifold.mRelativeContactPointsOn2.size() > 1)
+				{
+					Vec3 average_contact_point = Vec3::sZero();
+					for (const Vec3 &v : manifold.mRelativeContactPointsOn2)
+						average_contact_point += v;
+					average_contact_point /= (float)manifold.mRelativeContactPointsOn2.size();
+					ccd_body.mContactPointOn2 = manifold.mBaseOffset + average_contact_point;
+				}
+				else
+					ccd_body.mContactPointOn2 = manifold.mBaseOffset + cast_shape_result.mContactPointOn2;
+			}
 		}
-		else
-			ccd_body.mContactPointOn2 = manifold.mBaseOffset + cast_shape_result.mContactPointOn2;
 	}
+
+	// Collect information from the contact allocator and accumulate it in the step.
+	sFinalizeContactAllocator(*ioStep, contact_allocator);
 }
 
 void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
@@ -2378,271 +2323,262 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 	uint num_ccd_bodies = ioStep->mNumCCDBodies;
 	if (num_ccd_bodies > 0)
 	{
-		ContactAllocator contact_allocator(mContactManager.GetContactAllocator());
-		Array<SubShapeIDPair> ignored_contacts;
+		// Sort on fraction so that we process earliest collisions first
+		// This is needed to make the simulation deterministic and also to be able to stop contact processing
+		// between body pairs if an earlier hit was found involving the body by another CCD body
+		// (if it's body ID < this CCD body's body ID - see filtering logic in CCDBroadPhaseCollector)
+		CCDBody **sorted_ccd_bodies = (CCDBody **)temp_allocator->Allocate(num_ccd_bodies * sizeof(CCDBody *));
+		JPH_SCOPE_EXIT([temp_allocator, sorted_ccd_bodies, num_ccd_bodies]{ temp_allocator->Free(sorted_ccd_bodies, num_ccd_bodies * sizeof(CCDBody *)); });
+		{
+			JPH_PROFILE("Sort");
+
+			// We don't want to copy the entire struct (it's quite big), so we create a pointer array first
+			CCDBody *src_ccd_bodies = ioStep->mCCDBodies;
+			CCDBody **dst_ccd_bodies = sorted_ccd_bodies;
+			CCDBody **dst_ccd_bodies_end = dst_ccd_bodies + num_ccd_bodies;
+			while (dst_ccd_bodies < dst_ccd_bodies_end)
+				*(dst_ccd_bodies++) = src_ccd_bodies++;
+
+			// Which we then sort
+			QuickSort(sorted_ccd_bodies, sorted_ccd_bodies + num_ccd_bodies, [](const CCDBody *inBody1, const CCDBody *inBody2)
+				{
+					if (inBody1->mFractionPlusSlop != inBody2->mFractionPlusSlop)
+						return inBody1->mFractionPlusSlop < inBody2->mFractionPlusSlop;
+
+					return inBody1->mBodyID1 < inBody2->mBodyID1;
+				});
+		}
+
+		// We can collide with bodies that are not active, we track them here so we can activate them in one go at the end.
+		// This is also needed because we can't modify the active body array while we iterate it.
 		static constexpr int cBodiesBatch = 64;
 		BodyID *bodies_to_activate = (BodyID *)JPH_STACK_ALLOC(cBodiesBatch * sizeof(BodyID));
 		int num_bodies_to_activate = 0;
+
+		// We can move bodies that are not part of an island. In this case we need to notify the broadphase of the movement.
 		BodyID *bodies_to_update_bounds = (BodyID *)JPH_STACK_ALLOC(cBodiesBatch * sizeof(BodyID));
 		int num_bodies_to_update_bounds = 0;
 
-		// Resolve the earliest *current* trajectory intersection. Each accepted
-		// event stops at least one previously moving body, so this loop is bounded
-		// by the number of CCD bodies (sensor exclusions only discard candidates).
-		for (;;)
+		for (uint i = 0; i < num_ccd_bodies; ++i)
 		{
-			CCDBody *ccd_body = nullptr;
-			for (uint i = 0; i < num_ccd_bodies; ++i)
-			{
-				CCDBody &candidate = ioStep->mCCDBodies[i];
-				if (candidate.mMotionResolved || candidate.mBodyID2.IsInvalid()) continue;
-				if (ccd_body == nullptr || candidate.mFractionPlusSlop < ccd_body->mFractionPlusSlop
-					|| (candidate.mFractionPlusSlop == ccd_body->mFractionPlusSlop && candidate.mBodyID1 < ccd_body->mBodyID1))
-					ccd_body = &candidate;
-			}
-			if (ccd_body == nullptr) break;
-
-			// Reconstruct the full manifold only for the event that will actually
-			// be resolved. A discarded trajectory must not create touch/impact events.
-			ContactManifold manifold;
-			const float queued_fraction = ccd_body->mFractionPlusSlop;
-			FindCCDContact(ioContext, ioStep, *ccd_body, &ignored_contacts, &manifold);
-			if (ccd_body->mBodyID2.IsInvalid()) continue;
-			if (ccd_body->mFractionPlusSlop > queued_fraction) continue;
+			const CCDBody *ccd_body = sorted_ccd_bodies[i];
 			Body &body1 = mBodyManager.GetBody(ccd_body->mBodyID1);
-			Body &body2 = mBodyManager.GetBody(ccd_body->mBodyID2);
 			MotionProperties *body_mp = body1.GetMotionProperties();
-			CCDBody *ccd_body2 = sGetCCDBody(body2, ioStep);
-			if (body2.IsRigidBody())
-				mContactManager.OnCCDContactAdded(contact_allocator, body1, body2, manifold, ccd_body->mContactSettings);
-			else
-			{
-				ccd_body->mContactSettings.mCombinedFriction = 0.0f;
-				ccd_body->mContactSettings.mCombinedRestitution = mContactManager.GetCombineRestitution()(body1, SubShapeID(), body2, SubShapeID());
-				ccd_body->mContactSettings.mIsSensor = false;
-			}
-			if (ccd_body->mContactSettings.mIsSensor)
-			{
-				ignored_contacts.push_back(body1.GetID() < body2.GetID()
-					? SubShapeIDPair(body1.GetID(), manifold.mSubShapeID1, body2.GetID(), manifold.mSubShapeID2)
-					: SubShapeIDPair(body2.GetID(), manifold.mSubShapeID2, body1.GetID(), manifold.mSubShapeID1));
-				FindCCDContact(ioContext, ioStep, *ccd_body, &ignored_contacts);
-				continue;
-			}
-			const RVec3 body2_com_at_hit = body2.GetCenterOfMassPosition() + (ccd_body2 != nullptr
-				? ccd_body2->mDeltaPosition * min(ccd_body->mFraction, ccd_body2->mMotionFraction) : Vec3::sZero());
-			const RVec3 body1_com_at_hit = body1.GetCenterOfMassPosition() + ccd_body->mFraction * ccd_body->mDeltaPosition;
-			const ContactSettings &contact_settings = ccd_body->mContactSettings;
 
-			// Calculate contact point velocity for body 1
-			Vec3 r1_plus_u = Vec3(ccd_body->mContactPointOn2 - body1_com_at_hit);
-			Vec3 v1 = body1.GetPointVelocityCOM(r1_plus_u);
-
-			// Calculate inverse mass for body 1
-			float inv_m1 = contact_settings.mInvMassScale1 * body_mp->GetInverseMass();
-
-			if (body2.IsRigidBody())
+			// If there was a hit
+			if (!ccd_body->mBodyID2.IsInvalid())
 			{
-				const auto response = [&]()
+				Body &body2 = mBodyManager.GetBody(ccd_body->mBodyID2);
+
+				// Determine if the other body has a CCD body
+				CCDBody *ccd_body2 = sGetCCDBody(body2, ioStep);
+				if (ccd_body2 != nullptr)
 				{
-				// Calculate contact point velocity for body 2
-				Vec3 r2 = Vec3(ccd_body->mContactPointOn2 - body2_com_at_hit);
-				Vec3 v2 = body2.GetPointVelocityCOM(r2);
+					JPH_ASSERT(ccd_body2->mBodyID2 != ccd_body->mBodyID1, "If we collided with another body, that other body should have ignored collisions with us!");
 
-				// Calculate relative contact velocity
-				Vec3 relative_velocity = v2 - body1.GetPointVelocityCOM(r1_plus_u);
-				float normal_velocity = relative_velocity.Dot(ccd_body->mContactNormal);
-
-				// Calculate velocity bias due to restitution
-				float normal_velocity_bias;
-				if (contact_settings.mCombinedRestitution > 0.0f && normal_velocity < -mPhysicsSettings.mMinVelocityForRestitution)
-					normal_velocity_bias = contact_settings.mCombinedRestitution * normal_velocity;
-				else
-					normal_velocity_bias = 0.0f;
-
-				// Get inverse mass of body 2
-				float inv_m2 = body2.GetMotionPropertiesUnchecked() != nullptr? contact_settings.mInvMassScale2 * body2.GetMotionPropertiesUnchecked()->GetInverseMassUnchecked() : 0.0f;
-
-				// Solve contact constraint
-				ConcreteContactConstraintPart contact_constraint;
-				const bool applied = contact_constraint.SolveVelocityConstraint(body1, inv_m1, contact_settings.mInvInertiaScale1, r1_plus_u, body2, inv_m2, contact_settings.mInvInertiaScale2, r2, ccd_body->mContactNormal, normal_velocity_bias, 0.0f, FLT_MAX);
-
-				// Apply friction
-				if (contact_settings.mCombinedFriction > 0.0f)
-				{
-					// Calculate friction direction by removing normal velocity from the relative velocity
-					Vec3 friction_direction = relative_velocity - normal_velocity * ccd_body->mContactNormal;
-					float friction_direction_len_sq = friction_direction.LengthSq();
-					if (friction_direction_len_sq > 1.0e-12f)
+					// Check if the other body found a hit that is further away
+					if (ccd_body2->mFraction > ccd_body->mFraction)
 					{
-						// Normalize friction direction
-						friction_direction /= Sqrt(friction_direction_len_sq);
-
-						// Calculate max friction impulse
-						float max_lambda_f = contact_settings.mCombinedFriction * contact_constraint.GetTotalLambda();
-
-						ConcreteContactConstraintPart friction;
-						friction.SolveVelocityConstraint(body1, inv_m1, contact_settings.mInvInertiaScale1, r1_plus_u, body2, inv_m2, contact_settings.mInvInertiaScale2, r2, friction_direction, 0.0f, -max_lambda_f, max_lambda_f);
+						// Reset the colliding body of the other CCD body. The other body will shorten its distance traveled and will not do any collision response (we'll do that).
+						// This means that at this point we have triggered a contact point add/persist for our further hit by accident for the other body.
+						// We accept this as calling the contact point callbacks here would require persisting the manifolds up to this point and doing the callbacks single threaded.
+						ccd_body2->mBodyID2 = BodyID();
+						ccd_body2->mFractionPlusSlop = ccd_body->mFraction;
 					}
 				}
 
-				// Clamp velocity of body 2
-				if (body2.IsDynamic())
+				// If the other body moved less than us before hitting something, we're not colliding with it so we again have triggered contact point add/persist callbacks by accident.
+				// We'll just move to the collision position anyway (as that's the last position we know is good), but we won't do any collision response.
+				if (ccd_body2 == nullptr || ccd_body2->mFraction >= ccd_body->mFraction)
 				{
-					MotionProperties *body2_mp = body2.GetMotionProperties();
-					body2_mp->ClampLinearVelocity();
-					body2_mp->ClampAngularVelocity();
+					// The response and game callback must use the same impact-time lever.
+					const RVec3 body1_com_at_hit = body1.GetCenterOfMassPosition() + ccd_body->mFraction * ccd_body->mDeltaPosition;
+					const RVec3 body2_com_at_hit = body2.GetCenterOfMassPosition()
+						+ (ccd_body2 != nullptr? ccd_body->mFraction * ccd_body2->mDeltaPosition : Vec3::sZero());
+					const ContactSettings &contact_settings = ccd_body->mContactSettings;
+
+					// Calculate contact point velocity for body 1
+					Vec3 r1_plus_u = Vec3(ccd_body->mContactPointOn2 - body1_com_at_hit);
+					Vec3 v1 = body1.GetPointVelocityCOM(r1_plus_u);
+
+					// Calculate inverse mass for body 1
+					float inv_m1 = contact_settings.mInvMassScale1 * body_mp->GetInverseMass();
+
+					if (body2.IsRigidBody())
+					{
+						const auto response = [&]()
+						{
+						// Calculate contact point velocity for body 2
+						Vec3 r2 = Vec3(ccd_body->mContactPointOn2 - body2_com_at_hit);
+						Vec3 v2 = body2.GetPointVelocityCOM(r2);
+
+						// Calculate relative contact velocity
+						Vec3 relative_velocity = v2 - body1.GetPointVelocityCOM(r1_plus_u);
+						float normal_velocity = relative_velocity.Dot(ccd_body->mContactNormal);
+
+						// Calculate velocity bias due to restitution
+						float normal_velocity_bias;
+						if (contact_settings.mCombinedRestitution > 0.0f && normal_velocity < -mPhysicsSettings.mMinVelocityForRestitution)
+							normal_velocity_bias = contact_settings.mCombinedRestitution * normal_velocity;
+						else
+							normal_velocity_bias = 0.0f;
+
+						// Get inverse mass of body 2
+						float inv_m2 = body2.GetMotionPropertiesUnchecked() != nullptr? contact_settings.mInvMassScale2 * body2.GetMotionPropertiesUnchecked()->GetInverseMassUnchecked() : 0.0f;
+
+						// Solve contact constraint
+						ConcreteContactConstraintPart contact_constraint;
+						const bool applied = contact_constraint.SolveVelocityConstraint(body1, inv_m1, contact_settings.mInvInertiaScale1, r1_plus_u, body2, inv_m2, contact_settings.mInvInertiaScale2, r2, ccd_body->mContactNormal, normal_velocity_bias, 0.0f, FLT_MAX);
+
+						// Apply friction
+						if (contact_settings.mCombinedFriction > 0.0f)
+						{
+							// Calculate friction direction by removing normal velocity from the relative velocity
+							Vec3 friction_direction = relative_velocity - normal_velocity * ccd_body->mContactNormal;
+							float friction_direction_len_sq = friction_direction.LengthSq();
+							if (friction_direction_len_sq > 1.0e-12f)
+							{
+								// Normalize friction direction
+								friction_direction /= Sqrt(friction_direction_len_sq);
+
+								// Calculate max friction impulse
+								float max_lambda_f = contact_settings.mCombinedFriction * contact_constraint.GetTotalLambda();
+
+								ConcreteContactConstraintPart friction;
+								friction.SolveVelocityConstraint(body1, inv_m1, contact_settings.mInvInertiaScale1, r1_plus_u, body2, inv_m2, contact_settings.mInvInertiaScale2, r2, friction_direction, 0.0f, -max_lambda_f, max_lambda_f);
+							}
+						}
+
+						// Clamp velocity of body 2
+						if (body2.IsDynamic())
+						{
+							MotionProperties *body2_mp = body2.GetMotionProperties();
+							body2_mp->ClampLinearVelocity();
+							body2_mp->ClampAngularVelocity();
+						}
+						body_mp->ClampLinearVelocity();
+						body_mp->ClampAngularVelocity();
+						return applied;
+						};
+						const float closing = -(body2.GetPointVelocityCOM(Vec3(ccd_body->mContactPointOn2 - body2_com_at_hit)) - v1).Dot(ccd_body->mContactNormal);
+						if (contact_settings.mTrackContactResponse && closing > 0.0f)
+						{
+							ContactManifold manifold;
+							manifold.mBaseOffset = ccd_body->mContactPointOn2;
+							manifold.mWorldSpaceNormal = ccd_body->mContactNormal;
+							manifold.mPenetrationDepth = 0.0f;
+							manifold.mSubShapeID1 = ccd_body->mSubShapeID1;
+							manifold.mSubShapeID2 = ccd_body->mSubShapeID2;
+							manifold.mRelativeContactPointsOn1.push_back(Vec3::sZero());
+							manifold.mRelativeContactPointsOn2.push_back(Vec3::sZero());
+							mContactManager.OnCCDContactResponse(body1, body2, manifold, contact_settings, body1_com_at_hit, body2_com_at_hit, response);
+						}
+						else response();
+					}
+					else
+					{
+						SoftBodyMotionProperties *soft_mp = static_cast<SoftBodyMotionProperties *>(body2.GetMotionProperties());
+						const SoftBodyShape *soft_shape = static_cast<const SoftBodyShape *>(body2.GetShape());
+
+						// Convert the sub shape ID of the soft body to a face
+						uint32 face_idx = soft_shape->GetFaceIndex(ccd_body->mSubShapeID2);
+						const SoftBodyMotionProperties::Face &face = soft_mp->GetFace(face_idx);
+
+						// Get vertices of the face
+						SoftBodyMotionProperties::Vertex &vtx0 = soft_mp->GetVertex(face.mVertex[0]);
+						SoftBodyMotionProperties::Vertex &vtx1 = soft_mp->GetVertex(face.mVertex[1]);
+						SoftBodyMotionProperties::Vertex &vtx2 = soft_mp->GetVertex(face.mVertex[2]);
+
+						// Inverse mass of the face
+						float vtx0_mass = vtx0.mInvMass > 0.0f? 1.0f / vtx0.mInvMass : 1.0e10f;
+						float vtx1_mass = vtx1.mInvMass > 0.0f? 1.0f / vtx1.mInvMass : 1.0e10f;
+						float vtx2_mass = vtx2.mInvMass > 0.0f? 1.0f / vtx2.mInvMass : 1.0e10f;
+						float inv_m2 = 1.0f / (vtx0_mass + vtx1_mass + vtx2_mass);
+
+						// Calculate barycentric coordinates of the contact point on the soft body's face
+						float u, v, w;
+						RMat44 inv_body2_transform = body2.GetInverseCenterOfMassTransform();
+						Vec3 local_contact = Vec3(inv_body2_transform * ccd_body->mContactPointOn2);
+						ClosestPoint::GetBaryCentricCoordinates(vtx0.mPosition - local_contact, vtx1.mPosition - local_contact, vtx2.mPosition - local_contact, u, v, w);
+
+						// Calculate contact point velocity for the face
+						Vec3 v2 = inv_body2_transform.Multiply3x3Transposed(u * vtx0.mVelocity + v * vtx1.mVelocity + w * vtx2.mVelocity);
+						float normal_velocity = (v2 - v1).Dot(ccd_body->mContactNormal);
+
+						// Calculate velocity bias due to restitution
+						float normal_velocity_bias;
+						if (contact_settings.mCombinedRestitution > 0.0f && normal_velocity < -mPhysicsSettings.mMinVelocityForRestitution)
+							normal_velocity_bias = contact_settings.mCombinedRestitution * normal_velocity;
+						else
+							normal_velocity_bias = 0.0f;
+
+						// Calculate resulting velocity change (the math here is similar to AxisConstraintPart but without an inertia term for body 2 as we treat it as a point mass)
+						Vec3 r1_plus_u_x_n = r1_plus_u.Cross(ccd_body->mContactNormal);
+						Vec3 invi1_r1_plus_u_x_n = contact_settings.mInvInertiaScale1 * body1.GetInverseInertia().Multiply3x3(r1_plus_u_x_n);
+						float jv = r1_plus_u_x_n.Dot(body_mp->GetAngularVelocity()) - normal_velocity - normal_velocity_bias;
+						float inv_effective_mass = inv_m1 + inv_m2 + invi1_r1_plus_u_x_n.Dot(r1_plus_u_x_n);
+						float lambda = jv / inv_effective_mass;
+						body_mp->SubLinearVelocityStep((lambda * inv_m1) * ccd_body->mContactNormal);
+						body_mp->SubAngularVelocityStep(lambda * invi1_r1_plus_u_x_n);
+						Vec3 delta_v2 = inv_body2_transform.Multiply3x3(lambda * ccd_body->mContactNormal);
+						vtx0.mVelocity += delta_v2 * vtx0.mInvMass;
+						vtx1.mVelocity += delta_v2 * vtx1.mInvMass;
+						vtx2.mVelocity += delta_v2 * vtx2.mInvMass;
+
+						// If there's a contact listener, we need to flag this vertex as having had collision and force a contact callback.
+						// Note that during the soft body update that follows this, it is likely that a new collision will be found and that this will be overwritten.
+						if (mSoftBodyContactListener != nullptr)
+						{
+							BodyID body_id = ccd_body->mBodyID1;
+							Vec3 local_normal = inv_body2_transform.Multiply3x3(ccd_body->mContactNormal);
+							Plane contact_plane = Plane::sFromPointAndNormal(local_contact, local_normal);
+							vtx0.MarkCCDContact(body_id, contact_plane);
+							vtx1.MarkCCDContact(body_id, contact_plane);
+							vtx2.MarkCCDContact(body_id, contact_plane);
+							soft_mp->RequestContactCallback();
+						}
+					}
+
+					// Clamp velocity of body 1
+					body_mp->ClampLinearVelocity();
+					body_mp->ClampAngularVelocity();
+
+					// Activate the 2nd body if it is not already active
+					if (body2.IsDynamic() && !body2.IsActive())
+					{
+						bodies_to_activate[num_bodies_to_activate++] = ccd_body->mBodyID2;
+						if (num_bodies_to_activate == cBodiesBatch)
+						{
+							// Batch is full, activate now
+							mBodyManager.ActivateBodies(bodies_to_activate, num_bodies_to_activate);
+							num_bodies_to_activate = 0;
+						}
+					}
+
+				#ifdef JPH_DEBUG_RENDERER
+					if (sDrawMotionQualityLinearCast)
+					{
+						// Draw the collision location
+						RMat44 collision_transform = body1.GetCenterOfMassTransform().PostTranslated(ccd_body->mFraction * ccd_body->mDeltaPosition);
+						body1.GetShape()->Draw(DebugRenderer::sInstance, collision_transform, Vec3::sOne(), Color::sYellow, false, true);
+
+						// Draw the collision location + slop
+						RMat44 collision_transform_plus_slop = body1.GetCenterOfMassTransform().PostTranslated(ccd_body->mFractionPlusSlop * ccd_body->mDeltaPosition);
+						body1.GetShape()->Draw(DebugRenderer::sInstance, collision_transform_plus_slop, Vec3::sOne(), Color::sOrange, false, true);
+
+						// Draw contact normal
+						DebugRenderer::sInstance->DrawArrow(ccd_body->mContactPointOn2, ccd_body->mContactPointOn2 - ccd_body->mContactNormal, Color::sYellow, 0.1f);
+
+						// Draw post contact velocity
+						DebugRenderer::sInstance->DrawArrow(collision_transform.GetTranslation(), collision_transform.GetTranslation() + body1.GetLinearVelocity(), Color::sOrange, 0.1f);
+						DebugRenderer::sInstance->DrawArrow(collision_transform.GetTranslation(), collision_transform.GetTranslation() + body1.GetAngularVelocity(), Color::sPurple, 0.1f);
+					}
+				#endif // JPH_DEBUG_RENDERER
 				}
-				body_mp->ClampLinearVelocity();
-				body_mp->ClampAngularVelocity();
-				return applied;
-				};
-				const float closing = -(body2.GetPointVelocityCOM(Vec3(ccd_body->mContactPointOn2 - body2_com_at_hit)) - v1).Dot(ccd_body->mContactNormal);
-				if (contact_settings.mTrackContactResponse && closing > 0.0f)
-				{
-					ContactManifold manifold;
-					manifold.mBaseOffset = ccd_body->mContactPointOn2;
-					manifold.mWorldSpaceNormal = ccd_body->mContactNormal;
-					manifold.mPenetrationDepth = 0.0f;
-					manifold.mSubShapeID1 = ccd_body->mSubShapeID1;
-					manifold.mSubShapeID2 = ccd_body->mSubShapeID2;
-					manifold.mRelativeContactPointsOn1.push_back(Vec3::sZero());
-					manifold.mRelativeContactPointsOn2.push_back(Vec3::sZero());
-					mContactManager.OnCCDContactResponse(body1, body2, manifold, contact_settings, body1_com_at_hit, body2_com_at_hit, response);
-				}
-				else response();
-			}
-			else
-			{
-				SoftBodyMotionProperties *soft_mp = static_cast<SoftBodyMotionProperties *>(body2.GetMotionProperties());
-				const SoftBodyShape *soft_shape = static_cast<const SoftBodyShape *>(body2.GetShape());
-
-				// Convert the sub shape ID of the soft body to a face
-				uint32 face_idx = soft_shape->GetFaceIndex(ccd_body->mSubShapeID2);
-				const SoftBodyMotionProperties::Face &face = soft_mp->GetFace(face_idx);
-
-				// Get vertices of the face
-				SoftBodyMotionProperties::Vertex &vtx0 = soft_mp->GetVertex(face.mVertex[0]);
-				SoftBodyMotionProperties::Vertex &vtx1 = soft_mp->GetVertex(face.mVertex[1]);
-				SoftBodyMotionProperties::Vertex &vtx2 = soft_mp->GetVertex(face.mVertex[2]);
-
-				// Inverse mass of the face
-				float vtx0_mass = vtx0.mInvMass > 0.0f? 1.0f / vtx0.mInvMass : 1.0e10f;
-				float vtx1_mass = vtx1.mInvMass > 0.0f? 1.0f / vtx1.mInvMass : 1.0e10f;
-				float vtx2_mass = vtx2.mInvMass > 0.0f? 1.0f / vtx2.mInvMass : 1.0e10f;
-				float inv_m2 = 1.0f / (vtx0_mass + vtx1_mass + vtx2_mass);
-
-				// Calculate barycentric coordinates of the contact point on the soft body's face
-				float u, v, w;
-				RMat44 inv_body2_transform = body2.GetInverseCenterOfMassTransform();
-				Vec3 local_contact = Vec3(inv_body2_transform * ccd_body->mContactPointOn2);
-				ClosestPoint::GetBaryCentricCoordinates(vtx0.mPosition - local_contact, vtx1.mPosition - local_contact, vtx2.mPosition - local_contact, u, v, w);
-
-				// Calculate contact point velocity for the face
-				Vec3 v2 = inv_body2_transform.Multiply3x3Transposed(u * vtx0.mVelocity + v * vtx1.mVelocity + w * vtx2.mVelocity);
-				float normal_velocity = (v2 - v1).Dot(ccd_body->mContactNormal);
-
-				// Calculate velocity bias due to restitution
-				float normal_velocity_bias;
-				if (contact_settings.mCombinedRestitution > 0.0f && normal_velocity < -mPhysicsSettings.mMinVelocityForRestitution)
-					normal_velocity_bias = contact_settings.mCombinedRestitution * normal_velocity;
-				else
-					normal_velocity_bias = 0.0f;
-
-				// Calculate resulting velocity change (the math here is similar to AxisConstraintPart but without an inertia term for body 2 as we treat it as a point mass)
-				Vec3 r1_plus_u_x_n = r1_plus_u.Cross(ccd_body->mContactNormal);
-				Vec3 invi1_r1_plus_u_x_n = contact_settings.mInvInertiaScale1 * body1.GetInverseInertia().Multiply3x3(r1_plus_u_x_n);
-				float jv = r1_plus_u_x_n.Dot(body_mp->GetAngularVelocity()) - normal_velocity - normal_velocity_bias;
-				float inv_effective_mass = inv_m1 + inv_m2 + invi1_r1_plus_u_x_n.Dot(r1_plus_u_x_n);
-				float lambda = jv / inv_effective_mass;
-				body_mp->SubLinearVelocityStep((lambda * inv_m1) * ccd_body->mContactNormal);
-				body_mp->SubAngularVelocityStep(lambda * invi1_r1_plus_u_x_n);
-				Vec3 delta_v2 = inv_body2_transform.Multiply3x3(lambda * ccd_body->mContactNormal);
-				vtx0.mVelocity += delta_v2 * vtx0.mInvMass;
-				vtx1.mVelocity += delta_v2 * vtx1.mInvMass;
-				vtx2.mVelocity += delta_v2 * vtx2.mInvMass;
-
-				// If there's a contact listener, we need to flag this vertex as having had collision and force a contact callback.
-				// Note that during the soft body update that follows this, it is likely that a new collision will be found and that this will be overwritten.
-				if (mSoftBodyContactListener != nullptr)
-				{
-					BodyID body_id = ccd_body->mBodyID1;
-					Vec3 local_normal = inv_body2_transform.Multiply3x3(ccd_body->mContactNormal);
-					Plane contact_plane = Plane::sFromPointAndNormal(local_contact, local_normal);
-					vtx0.MarkCCDContact(body_id, contact_plane);
-					vtx1.MarkCCDContact(body_id, contact_plane);
-					vtx2.MarkCCDContact(body_id, contact_plane);
-					soft_mp->RequestContactCallback();
-				}
 			}
 
-			// Clamp velocity of body 1
-			body_mp->ClampLinearVelocity();
-			body_mp->ClampAngularVelocity();
-
-			// Activate the 2nd body if it is not already active
-			if (body2.IsDynamic() && !body2.IsActive())
-			{
-				bodies_to_activate[num_bodies_to_activate++] = ccd_body->mBodyID2;
-				if (num_bodies_to_activate == cBodiesBatch)
-				{
-					// Batch is full, activate now
-					mBodyManager.ActivateBodies(bodies_to_activate, num_bodies_to_activate);
-					num_bodies_to_activate = 0;
-				}
-			}
-
-		#ifdef JPH_DEBUG_RENDERER
-			if (sDrawMotionQualityLinearCast)
-			{
-				// Draw the collision location
-				RMat44 collision_transform = body1.GetCenterOfMassTransform().PostTranslated(ccd_body->mFraction * ccd_body->mDeltaPosition);
-				body1.GetShape()->Draw(DebugRenderer::sInstance, collision_transform, Vec3::sOne(), Color::sYellow, false, true);
-
-				// Draw the collision location + slop
-				RMat44 collision_transform_plus_slop = body1.GetCenterOfMassTransform().PostTranslated(ccd_body->mFractionPlusSlop * ccd_body->mDeltaPosition);
-				body1.GetShape()->Draw(DebugRenderer::sInstance, collision_transform_plus_slop, Vec3::sOne(), Color::sOrange, false, true);
-
-				// Draw contact normal
-				DebugRenderer::sInstance->DrawArrow(ccd_body->mContactPointOn2, ccd_body->mContactPointOn2 - ccd_body->mContactNormal, Color::sYellow, 0.1f);
-
-				// Draw post contact velocity
-				DebugRenderer::sInstance->DrawArrow(collision_transform.GetTranslation(), collision_transform.GetTranslation() + body1.GetLinearVelocity(), Color::sOrange, 0.1f);
-				DebugRenderer::sInstance->DrawArrow(collision_transform.GetTranslation(), collision_transform.GetTranslation() + body1.GetAngularVelocity(), Color::sPurple, 0.1f);
-			}
-		#endif // JPH_DEBUG_RENDERER
-			ccd_body->mMotionFraction = ccd_body->mFractionPlusSlop;
-			ccd_body->mMotionResolved = true;
-			bool second_changed = false;
-			if (ccd_body2 != nullptr && ccd_body2->mMotionFraction > ccd_body->mMotionFraction)
-			{
-				ccd_body2->mMotionFraction = ccd_body->mMotionFraction;
-				ccd_body2->mMotionResolved = true;
-				second_changed = true;
-			}
-			// Shortening a target's path can create a hit that didn't exist in the
-			// original relative sweep (e.g. contents catching a stopped container).
-			// Recast every still-moving overlapping path, not just the old hit pair.
-			for (uint i = 0; i < num_ccd_bodies; ++i)
-			{
-				CCDBody &candidate = ioStep->mCCDBodies[i];
-				if (candidate.mCastRequired && !candidate.mMotionResolved
-					&& (candidate.mSweptBounds.Overlaps(ccd_body->mSweptBounds)
-						|| (second_changed && candidate.mSweptBounds.Overlaps(ccd_body2->mSweptBounds))))
-					FindCCDContact(ioContext, ioStep, candidate, &ignored_contacts);
-			}
-		}
-		sFinalizeContactAllocator(*ioStep, contact_allocator);
-
-		// Keep all starts fixed during the event pass. Applying a position earlier
-		// would mix already-integrated and predicted paths in subsequent casts.
-		for (uint i = 0; i < num_ccd_bodies; ++i)
-		{
-			const CCDBody *ccd_body = &ioStep->mCCDBodies[i];
-			Body &body1 = mBodyManager.GetBody(ccd_body->mBodyID1);
-			MotionProperties *body_mp = body1.GetMotionProperties();
 			// Update body position
-			body1.AddPositionStep(ccd_body->mDeltaPosition * ccd_body->mMotionFraction);
+			body1.AddPositionStep(ccd_body->mDeltaPosition * ccd_body->mFractionPlusSlop);
 
 			// If the body was activated due to an earlier CCD step it will have an index in the active
 			// body list that it higher than the highest one we processed during FindCollisions

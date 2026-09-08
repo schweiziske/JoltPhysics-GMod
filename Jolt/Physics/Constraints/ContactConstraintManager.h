@@ -238,11 +238,6 @@ public:
 	///
 	/// Restitution is only applied when v_n^- is large enough and the points are moving towards collision
 	bool						SolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
-	/// Finish an under-converged heavy-on-light contact island with the same native
-	/// solver and physical masses. The caller must own the complete island, which
-	/// must not contain non-contact constraints, and must not have stored impulses
-	/// yet. Returns the number of additional velocity iterations performed.
-	uint						RefineVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, uint inNumVelocitySteps);
 	bool						SolveFrictionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 	bool						SolveVPhysicsImpactConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inDeltaTime);
 	bool						SolveLegacyFrictionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inDeltaTime);
@@ -634,10 +629,6 @@ private:
 	template <bool SolveFriction, bool SolveNonPenetration, bool PersistentOnly>
 	bool						TemplatedSolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 
-	/// Check the projected normal-velocity residual without changing the contact.
-	template <EMotionType Type1, EMotionType Type2>
-	static bool					sHasVelocityConstraintError(const ContactConstraintBase &inConstraint, float inTolerance);
-	bool						HasVelocityConstraintError(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inTolerance) const;
 
 	template <EMotionType Type1, EMotionType Type2>
 	static bool					sSolveLegacyFrictionConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime);

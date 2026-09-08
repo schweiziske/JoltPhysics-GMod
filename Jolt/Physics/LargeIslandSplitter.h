@@ -160,7 +160,7 @@ public:
 		return mSplitIslands[inSplitIslandIndex].mIslandIndex;
 	}
 
-	/// Ordinary velocity budget, excluding whole-island convergence refinement.
+	/// Velocity iteration count used by this split island, for diagnostics.
 	inline uint				GetNumVelocitySteps(uint inSplitIslandIndex) const
 	{
 		JPH_ASSERT(inSplitIslandIndex < mNumSplitIslands);

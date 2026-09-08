@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <Jolt/Geometry/AABox.h>
-
 #include <Jolt/Physics/Body/BodyPair.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhase.h>
@@ -101,7 +99,7 @@ public:
 		/// Contains the information needed to cast a body through the scene to do continuous collision detection
 		struct CCDBody
 		{
-							CCDBody(BodyID inBodyID1, Vec3Arg inDeltaPosition, float inLinearCastThresholdSq, float inMaxPenetration) : mDeltaPosition(inDeltaPosition), mBodyID1(inBodyID1), mCastRequired(inDeltaPosition.LengthSq() > inLinearCastThresholdSq), mMaxPenetration(inMaxPenetration) { }
+							CCDBody(BodyID inBodyID1, Vec3Arg inDeltaPosition, float inLinearCastThresholdSq, float inMaxPenetration) : mDeltaPosition(inDeltaPosition), mBodyID1(inBodyID1), mLinearCastThresholdSq(inLinearCastThresholdSq), mMaxPenetration(inMaxPenetration) { }
 
 			Vec3			mDeltaPosition;											///< Desired translation step
 			Vec3			mContactNormal;											///< World space normal of closest hit (only valid if mFractionPlusSlop < 1)
@@ -109,13 +107,10 @@ public:
 			BodyID			mBodyID1;												///< Body 1 (the body that is performing collision detection)
 			BodyID			mBodyID2;												///< Body 2 (the body of the closest hit, only valid if mFractionPlusSlop < 1)
 			SubShapeID		mSubShapeID2;											///< Sub shape of body 2 that was hit (only valid if mFractionPlusSlop < 1)
-			SubShapeID		mSubShapeID1;											///< Sub shape of the casting body, for response callbacks
+			SubShapeID		mSubShapeID1;										///< Casting sub shape for response callbacks
 			float			mFraction = 1.0f;										///< Fraction at which the hit occurred
 			float			mFractionPlusSlop = 1.0f;								///< Fraction at which the hit occurred + extra delta to allow body to penetrate by mMaxPenetration
-			float			mMotionFraction = 1.0f;								///< Actual path is the original translation up to this time, then stationary
-			bool			mMotionResolved = false;
-			bool			mCastRequired;										///< Above threshold, or shares a swept volume with a body whose path CCD can shorten
-			AABox			mSweptBounds;										///< Conservative bounds of the original full path, used to invalidate dependent casts
+			float			mLinearCastThresholdSq;									///< Maximum allowed squared movement before doing a linear cast (determined by inner radius of shape)
 			float			mMaxPenetration;										///< Maximum allowed penetration (determined by inner radius of shape)
 			ContactSettings	mContactSettings;										///< The contact settings for this contact
 		};
@@ -124,8 +119,6 @@ public:
 		uint32				mCCDBodiesCapacity = 0;									///< Capacity of the mCCDBodies list
 		atomic<uint32>		mNumCCDBodies = 0;										///< Number of CCD bodies in mCCDBodies
 		atomic<uint32>		mNextCCDBody { 0 };										///< Next unprocessed body index in mCCDBodies
-		Vec3				mCCDMinDelta = Vec3::sZero();
-		Vec3				mCCDMaxDelta = Vec3::sZero();
 		int *				mActiveBodyToCCDBody = nullptr;							///< A mapping between an index in BodyManager::mActiveBodies and the index in mCCDBodies
 		uint32				mNumActiveBodyToCCDBody = 0;							///< Number of indices in mActiveBodyToCCDBody
 

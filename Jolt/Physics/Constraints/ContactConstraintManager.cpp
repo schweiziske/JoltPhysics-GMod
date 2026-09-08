@@ -2304,11 +2304,17 @@ bool ContactConstraintManager::sDispatchContactResponse(ContactConstraintManager
 	constraint.mImpactResponseThisStep = true;
 	const auto response = [&]()
 	{
-		if (!inLegacyImpact)
+		const Vec3 delta_v1 = body1.GetLinearVelocity() - v1, delta_w1 = body1.GetAngularVelocity() - w1;
+		const Vec3 delta_v2 = body2.GetLinearVelocity() - v2, delta_w2 = body2.GetAngularVelocity() - w2;
+		if (!inLegacyImpact && (delta_v1 != Vec3::sZero() || delta_w1 != Vec3::sZero()
+			|| delta_v2 != Vec3::sZero() || delta_w2 != Vec3::sZero()))
 		{
 			// PreCollision may legitimately change velocity. Rebuild only the
 			// normal row from that velocity, preserving lambda, tangential state,
 			// material selection and the contact's original numerical routing.
+			// A read-only callback must retain the pre-solve restitution target:
+			// warm starting and other contacts can produce large intermediate
+			// velocities which are solver work, not fresh incident energy.
 			Mat44 inv_i1 = Mat44::sZero(), inv_i2 = Mat44::sZero();
 			if constexpr (Type1 == EMotionType::Dynamic) inv_i1 = constraint.mInvInertiaScale1 * body1.GetInverseInertia();
 			if constexpr (Type2 == EMotionType::Dynamic) inv_i2 = constraint.mInvInertiaScale2 * body2.GetInverseInertia();
@@ -2322,6 +2328,9 @@ bool ContactConstraintManager::sDispatchContactResponse(ContactConstraintManager
 			for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
 			{
 				auto &wcp = constraint.mContactPoints[i];
+				// A tangential-only callback edit does not invalidate this normal row.
+				if (wcp.mNonPenetrationConstraint.GetVelocityConstraintValue(delta_v1, delta_w1, delta_v2, delta_w2, normal) == 0.0f)
+					continue;
 				wcp.CalculateNonPenetrationConstraintProperties(delta_time, inManager.mUpdateContext->mPhysicsSystem->GetGravity(),
 					body1, body2, constraint.mInvMass1, constraint.mInvMass2, inv_i1, inv_i2,
 					manifold.GetWorldSpaceContactPointOn1(i), manifold.GetWorldSpaceContactPointOn2(i), normal, settings,
@@ -2381,17 +2390,18 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 
 	if (constraint.mSevereInterpenetration)
 	{
-		// IVP_Anomaly_Manager::solve_inter_penetration_simple applies one bounded
-		// asynchronous speed change per body along the line between their cores.
-		// Crucially, it does not turn penetration depth into a velocity and does not
-		// repeat the full rescue for every point in the contact manifold.
+		// This adapter fallback borrows the core-to-core direction and gravity-based
+		// speed from IVP_Anomaly_Manager::solve_inter_penetration_simple. It applies
+		// one response per manifold invocation, not per point. Compound body pairs
+		// with multiple manifolds can still receive multiple responses.
 		const Vec3 rescue_direction = Vec3(
 			constraint.mBody2->GetCenterOfMassPosition()
 			- constraint.mBody1->GetCenterOfMassPosition()).NormalizedOr(Vec3::sAxisX());
-		// The rescue is one pair impulse, not an equal velocity assignment. Applying
-		// the same speed to both bodies makes a 1 kg prop kick an 85 kg player as hard
-		// as the prop itself, while IVP conserves pair momentum and lets the light body
-		// take nearly all of the separation velocity.
+		// The equal-and-opposite impulse is an adapter policy, not an exact IVP port.
+		// The reference IVP anomaly manager scales each body's push by its own mass,
+		// producing equal linear speed changes, and also adds angular motion.
+		// This implementation instead conserves pair linear momentum and gives the
+		// lighter body more separation speed; do not claim anomaly-response parity.
 		const float inverse_mass_sum = constraint.mInvMass1 + constraint.mInvMass2;
 		const uint32 dynamic_body_count =
 			(Type1 == EMotionType::Dynamic ? 1u : 0u)
@@ -3170,97 +3180,6 @@ bool ContactConstraintManager::TemplatedSolveVelocityConstraints(const uint32 *i
 bool ContactConstraintManager::SolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd)
 {
 	return TemplatedSolveVelocityConstraints<true, true, false>(inConstraintOffsetBegin, inConstraintOffsetEnd);
-}
-
-template <EMotionType Type1, EMotionType Type2>
-bool ContactConstraintManager::sHasVelocityConstraintError(const ContactConstraintBase &inConstraint, float inTolerance)
-{
-	const ContactConstraint<Type1, Type2> &constraint = static_cast<const ContactConstraint<Type1, Type2> &>(inConstraint);
-	Vec3 v1, w1, v2, w2;
-	sGetVelocities<Type1, Type2>(constraint.mBody1->GetMotionPropertiesUnchecked(), constraint.mBody2->GetMotionPropertiesUnchecked(), v1, w1, v2, w2);
-	const Vec3 normal = constraint.GetWorldSpaceNormal();
-	for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
-	{
-		const auto &part = constraint.mContactPoints[i].mNonPenetrationConstraint;
-		if (!part.IsActive())
-			continue;
-		const float error = part.GetVelocityConstraintValue(v1, w1, v2, w2, normal) - part.GetVelocityBias();
-		// A loaded row must satisfy its velocity target. An unloaded row may
-		// separate freely: making abs(error) unconditional would prevent exit.
-		const float projected_error = part.GetTotalLambda() > 0.0f? abs(error) : max(0.0f, error);
-		if (projected_error > inTolerance)
-			return true;
-	}
-	return false;
-}
-
-bool ContactConstraintManager::HasVelocityConstraintError(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inTolerance) const
-{
-	using DispatchFunc = bool (*)(const ContactConstraintBase &, float);
-	static const DispatchFunc table[3][3] = {
-		{ nullptr, nullptr, sHasVelocityConstraintError<EMotionType::Static, EMotionType::Dynamic> },
-		{ nullptr, nullptr, sHasVelocityConstraintError<EMotionType::Kinematic, EMotionType::Dynamic> },
-		{
-			sHasVelocityConstraintError<EMotionType::Dynamic, EMotionType::Static>,
-			sHasVelocityConstraintError<EMotionType::Dynamic, EMotionType::Kinematic>,
-			sHasVelocityConstraintError<EMotionType::Dynamic, EMotionType::Dynamic>
-		}
-	};
-	for (const uint32 *offset = inConstraintOffsetBegin; offset < inConstraintOffsetEnd; ++offset)
-	{
-		const auto &constraint = *reinterpret_cast<const ContactConstraintBase *>(mConstraints + *offset);
-		if (table[(int)constraint.mBody1->GetMotionType()][(int)constraint.mBody2->GetMotionType()](constraint, inTolerance))
-			return true;
-	}
-	return false;
-}
-
-uint ContactConstraintManager::RefineVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, uint inNumVelocitySteps)
-{
-	// A heavy body pressing a light body against a fixed support is ill-conditioned
-	// for sequential impulses. Merely raising 10 iterations to 30 still leaves
-	// metres/second of closing velocity at large mass ratios, which the position
-	// solver cannot repair without bodies crossing. Finish the velocity solve
-	// before integration; don't change masses, warm start again or move bodies.
-	constexpr uint cMaxVelocitySteps = 8192;
-	constexpr uint cResidualCheckInterval = 8;
-	constexpr float cVelocityTolerance = 0.0025f; // m/s; less than 0.04 mm per 1/64 s step
-	if (inNumVelocitySteps >= cMaxVelocitySteps || inConstraintOffsetBegin >= inConstraintOffsetEnd)
-		return 0;
-
-	bool has_fixed_support = false;
-	float min_inverse_mass = FLT_MAX, max_inverse_mass = 0.0f;
-	for (const uint32 *offset = inConstraintOffsetBegin; offset < inConstraintOffsetEnd; ++offset)
-	{
-		const auto &constraint = *reinterpret_cast<const ContactConstraintBase *>(mConstraints + *offset);
-		// Legacy response/friction has a once-per-PSI schedule, not this iterative
-		// contact solve. Never refine only part of a mixed island around its owner.
-		if (constraint.mUseVPhysicsSolver || constraint.mUseLegacyFriction)
-			return 0;
-		has_fixed_support |= !constraint.mBody1->IsDynamic() || !constraint.mBody2->IsDynamic();
-		for (float inverse_mass : { constraint.mInvMass1, constraint.mInvMass2 })
-			if (inverse_mass > 0.0f)
-			{
-				min_inverse_mass = min(min_inverse_mass, inverse_mass);
-				max_inverse_mass = max(max_inverse_mass, inverse_mass);
-			}
-	}
-	if (!has_fixed_support || min_inverse_mass == FLT_MAX || max_inverse_mass / min_inverse_mass < 10.0f)
-		return 0;
-
-	JPH_PROFILE_FUNCTION();
-	uint extra_steps = 0;
-	const uint max_extra_steps = cMaxVelocitySteps - inNumVelocitySteps;
-	while (extra_steps < max_extra_steps)
-	{
-		if (extra_steps % cResidualCheckInterval == 0
-			&& !HasVelocityConstraintError(inConstraintOffsetBegin, inConstraintOffsetEnd, cVelocityTolerance))
-			break;
-		++extra_steps;
-		if (!SolveVelocityConstraints(inConstraintOffsetBegin, inConstraintOffsetEnd))
-			break;
-	}
-	return extra_steps;
 }
 
 bool ContactConstraintManager::SolveFrictionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd)
