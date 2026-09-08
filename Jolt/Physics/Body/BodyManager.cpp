@@ -602,7 +602,11 @@ void BodyManager::GetBodyIDs(BodyIDVector &outBodies) const
 	JPH_PROFILE_FUNCTION();
 
 	UniqueLock lock(mBodiesMutex JPH_IF_ENABLE_ASSERTS(, this, EPhysicsLockTypes::BodiesList));
+	GetBodyIDsNoLock(outBodies);
+}
 
+void BodyManager::GetBodyIDsNoLock(BodyIDVector &outBodies) const
+{
 	// Reserve space for all bodies
 	outBodies.clear();
 	outBodies.reserve(mNumBodies);

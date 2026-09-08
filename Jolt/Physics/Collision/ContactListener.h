@@ -6,6 +6,7 @@
 
 #include <Jolt/Physics/Collision/Shape/SubShapeIDPair.h>
 #include <Jolt/Core/StaticArray.h>
+#include <functional>
 
 JPH_NAMESPACE_BEGIN
 
@@ -47,8 +48,10 @@ public:
 	float					mInvMassScale2 = 1.0f;				///< Scale factor for the inverse mass of body 2 (0 = infinite mass, 1 = use original mass, 2 = body has half the mass). For the same contact pair, you should strive to keep the value the same over time.
 	float					mInvInertiaScale2 = 1.0f;			///< Scale factor for the inverse inertia of body 2 (usually same as mInvMassScale2)
 	bool					mIsSensor;							///< If the contact should be treated as a sensor vs body contact (no collision response)
+	bool					mTrackContactResponse = false;		///< Opt into a callback around the first real normal response, not contact discovery.
+	uint32					mResponseCacheHandle = ~uint32(0); ///< Internal CCD response lifecycle handle; listeners must not change it.
 	bool					mVPhysicsImpactingContact = false;	///< Adapter semantic: contact enters IVP's impact distance during this update.
-	bool					mVPhysicsUseLegacySolver = false;	///< Adapter semantic: solve the owning island with the IVP event-time contact path.
+	bool					mVPhysicsUseLegacySolver = false;	///< Adapter semantic: this contact uses the IVP event-time impact / persistent distance-keeper path.
 	bool					mVPhysicsUseLegacySolverForImpactOnly = false; ///< Adapter semantic: use IVP event-time impact once, then return established support to Jolt's iterative contact solver.
 	bool					mVPhysicsDisablePenetrationRecovery = false; ///< Adapter semantic: keep velocity blocking but suppress rescue / split-position depenetration for this pair.
 	bool					mVPhysicsSevereInterpenetration = false; ///< Adapter semantic: route a failed deep-overlap mindist through IVP's bounded anomaly rescue.
@@ -150,6 +153,17 @@ public:
 	/// detect this by keeping the old shape (before adding/removing a part) around until the next PhysicsSystem::Update (when the OnContactPersisted
 	/// callbacks are triggered) and resolving the sub shape ID against both the old and new shape to see if they still refer to the same child shape.
 	virtual void			OnContactPersisted([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, [[maybe_unused]] const ContactManifold &inManifold, [[maybe_unused]] ContactSettings &ioSettings) { /* Do nothing */ }
+
+	/// Adapter extension: invoke inResponse exactly once. It is the current solver
+	/// invocation, not an estimate. A listener that calls game code must suspend all
+	/// jobs and dispatch on Update's owner. Only endpoint velocities may change;
+	/// topology, transforms and mass properties must wait until Update completes.
+	virtual bool			OnContactResponse([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, [[maybe_unused]] const ContactManifold &inManifold, [[maybe_unused]] uint inPoint, const std::function<bool()> &inResponse) { return inResponse(); }
+
+	/// A swept response uses contact points at its hit time while the integrator
+	/// still retains the start transforms. Supply the COMs used by the actual
+	/// response so listeners don't mistake omega x translation for impact speed.
+	virtual bool			OnContactResponseAtTime(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, uint inPoint, [[maybe_unused]] RVec3Arg inCenterOfMass1, [[maybe_unused]] RVec3Arg inCenterOfMass2, const std::function<bool()> &inResponse) { return OnContactResponse(inBody1, inBody2, inManifold, inPoint, inResponse); }
 
 	/// Called after the velocity solver has stored the final normal impulse for a contact manifold.
 	/// This adapter extension exposes the resolved pressure needed by Source's friction snapshot;

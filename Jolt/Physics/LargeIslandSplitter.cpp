@@ -212,7 +212,7 @@ void LargeIslandSplitter::Prepare(const IslandBuilder &inIslandBuilder, const Co
 			// forever for work that cannot appear on the second persistent-contact frame.
 			// Ordered Havana passes need the same controller/contact boundary at every island
 			// size. Do not reserve a native split slot that will never be published.
-			if (!inContactManager.AreAnyContactIndicesUsingVPhysicsSolver(contacts_start, contacts_end)
+			if (!inContactManager.AreAnyContactIndicesUsingLegacySolver(contacts_start, contacts_end)
 				&& !ConstraintManager::sHasLegacyConstraints(inActiveConstraints, constraints_start, constraints_end))
 			{
 				mNumSplitIslands++;
@@ -328,6 +328,8 @@ bool LargeIslandSplitter::SplitIsland(uint32 inIslandIndex, const IslandBuilder 
 	// Check if it exceeds the threshold
 	uint island_size = num_contacts_in_island + num_constraints_in_island;
 	if (island_size < cLargeIslandTreshold
+		|| inContactManager.AreAnyContactsUsingVPhysicsSolver(contacts_start, contacts_end)
+		|| inContactManager.AreAnyContactsUsingLegacyFriction(contacts_start, contacts_end)
 		|| ConstraintManager::sHasLegacyConstraints(inActiveConstraints, constraints_start, constraints_end))
 		return false;
 

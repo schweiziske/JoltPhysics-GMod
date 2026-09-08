@@ -385,8 +385,12 @@ public:
 				break;
 			}
 
-			// Keep track of the minimum distance
-			closest_dist_sq = min(closest_dist_sq, dist_sq);
+			// Retain faces at the best support distance, including the convergence
+			// tolerance. A face at that distance can be the actual minimum (e.g. a
+			// flat box face). Pruning it with a strict upper bound can empty the
+			// queue after expanding a different, unconverged face of the initial
+			// GJK simplex, returning that face's unrelated penetration direction.
+			closest_dist_sq = min(closest_dist_sq, dist_sq * (1.0f + inTolerance));
 
 			// If the triangle thinks this point is not front facing, we've reached numerical precision and we're done
 			if (!t->IsFacing(w))

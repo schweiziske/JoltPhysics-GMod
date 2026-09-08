@@ -31,6 +31,22 @@ class JPH_EXPORT PhysicsSystem : public NonCopyable
 public:
 	JPH_OVERRIDE_NEW_DELETE
 
+	/// Optional diagnostics. Enable/read only outside Update. Data describes the last
+	/// collision substep, copied after all workers finish and before island buffers expire.
+	/// Island indices are temporary; mKey is the lowest full BodyID in that island.
+	enum class DebugIslandMode : uint8 { Free, Whole, Split, Legacy, SplitterOff };
+	struct DebugIsland
+	{
+		uint32 mIndex = 0, mKey = BodyID::cInvalidBodyID;
+		uint32 mConstraints = 0, mLegacyConstraints = 0, mUser1Constraints = 0;
+		uint32 mVelocitySteps = 0, mPositionSteps = 0;
+		DebugIslandMode mMode = DebugIslandMode::Free;
+		Array<BodyID> mBodies;
+		Array<ContactConstraintManager::DebugContact> mContacts;
+	};
+	void SetIslandDebugEnabled(bool inEnabled) { mIslandDebugEnabled = inEnabled; if (!inEnabled) mDebugIslands.clear(); }
+	const Array<DebugIsland> &GetDebugIslands() const { return mDebugIslands; }
+
 	/// Constructor / Destructor
 								PhysicsSystem()												: mContactManager(mPhysicsSettings) JPH_IF_ENABLE_ASSERTS(, mConstraintManager(&mBodyManager)) { }
 								~PhysicsSystem();
@@ -233,6 +249,9 @@ public:
 	/// Get copy of the list of all bodies under protection of a lock.
 	/// @param outBodyIDs On return, this will contain the list of BodyIDs
 	void						GetBodies(BodyIDVector &outBodyIDs) const					{ return mBodyManager.GetBodyIDs(outBodyIDs); }
+	/// Only for the Update owner with all jobs suspended and Update's locks held.
+	void						GetBodiesNoLock(BodyIDVector &outBodyIDs) const			{ return mBodyManager.GetBodyIDsNoLock(outBodyIDs); }
+	Constraints					GetConstraintsNoLock() const								{ return mConstraintManager.GetConstraintsNoLock(); }
 
 	/// Get copy of the list of active bodies under protection of a lock.
 	/// @param inType The type of bodies to get
@@ -283,8 +302,10 @@ private:
 	void						JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
 	void						JobPreIntegrateVelocity(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
 	void						JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
-	void						JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep) const;
+	void						JobPostIntegrateVelocity(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
 	void						JobFindCCDContacts(const PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
+	void						FindCCDContact(const PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep, CCDBody &ioBody,
+		const Array<SubShapeIDPair> *inIgnoredContacts = nullptr, ContactManifold *outManifold = nullptr);
 	void						JobResolveCCDContacts(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
 	void						JobContactRemovedCallbacks(const PhysicsUpdateContext::Step *ioStep);
 	void						JobSolvePositionConstraints(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep);
@@ -377,6 +398,8 @@ private:
 
 	/// Keeps track of connected bodies and builds islands for multithreaded velocity/position update
 	IslandBuilder				mIslandBuilder;
+	bool mIslandDebugEnabled = false;
+	Array<DebugIsland> mDebugIslands;
 
 	/// Will split large islands into smaller groups of bodies that can be processed in parallel
 	LargeIslandSplitter			mLargeIslandSplitter;

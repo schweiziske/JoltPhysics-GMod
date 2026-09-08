@@ -152,6 +152,10 @@ public:
 	/// Get maximum number of concurrently executing jobs
 	virtual int				GetMaxConcurrency() const = 0;
 
+	/// A running job that is waiting for another job must allow a wrapper to
+	/// suspend it, e.g. while dispatching a synchronous callback on the owner.
+	virtual void			CooperativeYield() { }
+
 	/// Create a new job, the job is started immediately if inNumDependencies == 0 otherwise it starts when
 	/// RemoveDependency causes the dependency counter to reach 0.
 	virtual JobHandle		CreateJob(const char *inName, ColorArg inColor, const JobFunction &inJobFunction, uint32 inNumDependencies = 0) = 0;

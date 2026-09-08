@@ -39,6 +39,8 @@ public:
 	virtual Barrier *		CreateBarrier() override;
 	virtual void			DestroyBarrier(Barrier *inBarrier) override;
 	virtual void			WaitForJobs(Barrier *inBarrier) override;
+	void					WaitForJobs(Barrier *inBarrier, const JobFunction &inOwnerWork);
+	void					WakeWaiter(Barrier *inBarrier);
 
 private:
 	class BarrierImpl : public Barrier
@@ -58,7 +60,8 @@ private:
 		inline bool			IsEmpty() const									{ return mJobReadIndex == mJobWriteIndex; }
 
 		/// Wait for all jobs in this job barrier, while waiting, execute jobs that are part of this barrier on the current thread
-		void				Wait();
+		void				Wait(const JobFunction &inOwnerWork);
+		void				WakeWaiter() { ++mNumToAcquire; mSemaphore.Release(); }
 
 		/// Flag to indicate if a barrier has been handed out
 		atomic<bool>		mInUse { false };

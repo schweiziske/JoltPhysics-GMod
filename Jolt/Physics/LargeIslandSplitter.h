@@ -160,6 +160,13 @@ public:
 		return mSplitIslands[inSplitIslandIndex].mIslandIndex;
 	}
 
+	/// Ordinary velocity budget, excluding whole-island convergence refinement.
+	inline uint				GetNumVelocitySteps(uint inSplitIslandIndex) const
+	{
+		JPH_ASSERT(inSplitIslandIndex < mNumSplitIslands);
+		return uint(mSplitIslands[inSplitIslandIndex].mNumVelocitySteps);
+	}
+
 	/// Prepare the island splitter for iterating over the split islands again for position solving. Marks all batches as startable.
 	void					PrepareForSolvePositions();
 

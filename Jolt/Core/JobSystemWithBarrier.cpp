@@ -102,7 +102,7 @@ void JobSystemWithBarrier::BarrierImpl::OnJobFinished(Job *inJob)
 	mSemaphore.Release();
 }
 
-void JobSystemWithBarrier::BarrierImpl::Wait()
+void JobSystemWithBarrier::BarrierImpl::Wait(const JobFunction &inOwnerWork)
 {
 	while (mNumToAcquire > 0)
 	{
@@ -113,6 +113,7 @@ void JobSystemWithBarrier::BarrierImpl::Wait()
 			bool has_executed;
 			do
 			{
+				if (inOwnerWork) inOwnerWork();
 				has_executed = false;
 
 				// Loop through the jobs and erase jobs from the beginning of the list that are done
@@ -224,7 +225,17 @@ void JobSystemWithBarrier::WaitForJobs(Barrier *inBarrier)
 	JPH_PROFILE_FUNCTION();
 
 	// Let our barrier implementation wait for the jobs
-	static_cast<BarrierImpl *>(inBarrier)->Wait();
+	static_cast<BarrierImpl *>(inBarrier)->Wait({});
+}
+
+void JobSystemWithBarrier::WaitForJobs(Barrier *inBarrier, const JobFunction &inOwnerWork)
+{
+	static_cast<BarrierImpl *>(inBarrier)->Wait(inOwnerWork);
+}
+
+void JobSystemWithBarrier::WakeWaiter(Barrier *inBarrier)
+{
+	static_cast<BarrierImpl *>(inBarrier)->WakeWaiter();
 }
 
 JPH_NAMESPACE_END

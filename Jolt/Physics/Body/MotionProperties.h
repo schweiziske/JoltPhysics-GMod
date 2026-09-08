@@ -200,7 +200,7 @@ public:
 		atomic<uint64>		mCCDTicks = 0;													///< Number of ticks spent doing CCD
 		atomic<uint32>		mNumContactConstraints = 0;										///< Number of contact constraints created for this body
 		uint8				mNumCollisionSteps = 0;											///< Number of collision steps this body was active (see PhysicsSystem::Update(..., inCollisionSteps, ...)). All other properties are aggregated over multiple steps, so if you want e.g. the number of contact constraints per step you need to divide by this number.
-		uint8				mNumVelocitySteps = 0;											///< Number of velocity iterations performed
+		uint32				mNumVelocitySteps = 0;											///< Number of velocity iterations performed, including convergence refinement
 		uint8				mNumPositionSteps = 0;											///< Number of position iterations performed
 		bool				mIsLargeIsland = false;											///< If this body was part of a large island
 	};

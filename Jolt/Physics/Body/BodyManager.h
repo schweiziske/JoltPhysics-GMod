@@ -140,6 +140,7 @@ public:
 
 	/// Get all body IDs under the protection of a lock
 	void							GetBodyIDs(BodyIDVector &outBodies) const;
+	void							GetBodyIDsNoLock(BodyIDVector &outBodies) const;
 
 	/// Access a body (not protected by lock)
 	const Body &					GetBody(const BodyID &inID) const			{ return *mBodies[inID.GetIndex()]; }

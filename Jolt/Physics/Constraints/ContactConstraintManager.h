@@ -34,6 +34,19 @@ class JPH_EXPORT ContactConstraintManager : public NonCopyable
 public:
 	JPH_OVERRIDE_NEW_DELETE
 
+	/// Value-only diagnostics of discrete solver contacts (not CCD or sensor overlaps).
+	struct DebugContact
+	{
+		BodyID mBody1, mBody2;
+		RVec3 mCenter1, mCenter2;
+		uint32 mPoints = 0;
+		bool mLegacyNormal = false;
+		bool mLegacyFriction = false;
+		bool mNativeTuning = false;
+		bool mBothDynamic = false;
+	};
+	void GetDebugContacts(const uint32 *inBegin, const uint32 *inEnd, Array<DebugContact> &outContacts) const;
+
 	/// Constructor
 	explicit					ContactConstraintManager(const PhysicsSettings &inPhysicsSettings);
 								~ContactConstraintManager();
@@ -225,6 +238,11 @@ public:
 	///
 	/// Restitution is only applied when v_n^- is large enough and the points are moving towards collision
 	bool						SolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	/// Finish an under-converged heavy-on-light contact island with the same native
+	/// solver and physical masses. The caller must own the complete island, which
+	/// must not contain non-contact constraints, and must not have stored impulses
+	/// yet. Returns the number of additional velocity iterations performed.
+	uint						RefineVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, uint inNumVelocitySteps);
 	bool						SolveFrictionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
 	bool						SolveVPhysicsImpactConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inDeltaTime);
 	bool						SolveLegacyFrictionConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inDeltaTime);
@@ -240,7 +258,8 @@ public:
 	bool						AreAnyContactsImpacting(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
 	bool						AreAnyContactsUsingVPhysicsSolver(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
 	bool						AreAnyContactsUsingLegacyFriction(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
-	bool						AreAnyContactIndicesUsingVPhysicsSolver(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const;
+	/// Compatibility contacts require the full controller schedule, including legacy-friction-only contacts.
+	bool						AreAnyContactIndicesUsingLegacySolver(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const;
 
 	/// Save back the lambdas to the contact cache for the next warm start
 	void						StoreAppliedImpulses(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
@@ -276,6 +295,7 @@ public:
 	/// @param inManifold The manifold that describes the collision
 	/// @param outSettings The calculated contact settings (may be overridden by the contact listener)
 	void						OnCCDContactAdded(ContactAllocator &ioContactAllocator, const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, ContactSettings &outSettings);
+	bool						OnCCDContactResponse(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, const ContactSettings &inSettings, RVec3Arg inCenterOfMass1, RVec3Arg inCenterOfMass2, const std::function<bool()> &inResponse);
 
 #ifdef JPH_DEBUG_RENDERER
 	// Drawing properties
@@ -346,8 +366,11 @@ private:
 			ContactPersisted	= 1,																///< If this cache entry was reused in the next simulation update
 			CCDContact			= 2,																///< This is a cached manifold reported by continuous collision detection and was only used to create a contact callback
 			VPhysicsDeferPlayerSupport = 4,													///< Preserve a discrete-pass player-support deferral through the CCD pass of the same update
-			VPhysicsPlayerSupportStartup = 8												///< Preserve exact-touch player support until it establishes friction
+			VPhysicsPlayerSupportStartup = 8,											///< Preserve exact-touch player support until it establishes friction
+			ResponseEstablished = 16														///< A real CCD response occurred, even though its cache entry has no solver points
 		};
+		static constexpr uint16 cSavedFlags = (uint16)EFlags::VPhysicsDeferPlayerSupport
+			| (uint16)EFlags::VPhysicsPlayerSupportStartup | (uint16)EFlags::ResponseEstablished;
 
 		/// @see EFlags
 		mutable atomic<uint16>	mFlags { 0 };
@@ -420,6 +443,8 @@ private:
 		MKVAndCreated			FindOrCreate(ContactAllocator &ioContactAllocator, const SubShapeIDPair &inKey, uint64 inKeyHash, int inNumContactPoints);
 		uint32					ToHandle(const MKeyValue *inKeyValue) const;
 		const MKeyValue *		FromHandle(uint32 inHandle) const;
+		/// Resolve an already initialized entry owned by the current writer (CCD response).
+		const MKeyValue *		FromWriteHandle(uint32 inHandle) const;
 
 		/// Find / create entry for BodyPair -> CachedBodyPair
 		const BPKeyValue *		Find(const BodyPair &inKey, uint64 inKeyHash) const;
@@ -436,7 +461,7 @@ private:
 		/// Get the amount of body pairs in the cache
 		uint					GetNumBodyPairs() const						{ return mCachedBodyPairs.GetNumKeyValues(); }
 
-		/// Before a cache is finalized you can only do Create(), after only Find() or Clear()
+		/// Before finalization, only create or access the writer's initialized entries; after, only read or clear.
 		void					Finalize();
 #endif
 
@@ -473,6 +498,7 @@ private:
 		using ConstraintPart = ContactConstraintPart<Type1, Type2>;
 
 		/// Calculate constraint properties for the parts below
+		JPH_INLINE void			CalculateNonPenetrationConstraintProperties(float inDeltaTime, Vec3Arg inGravity, const Body &inBody1, const Body &inBody2, float inInvM1, float inInvM2, Mat44Arg inInvI1, Mat44Arg inInvI2, RVec3Arg inWorldSpacePosition1, RVec3Arg inWorldSpacePosition2, Vec3Arg inWorldSpaceNormal, const ContactSettings &inSettings, float inMinVelocityForRestitution, float inContactSeparationTarget, float inContactVelocityBiasFactorOutsideTarget, float inContactVelocityBiasFactorInsideTarget, float inContactRescueVelocityFactor, bool inAllowContactRescue, bool inAllowRestitution);
 		JPH_INLINE void			CalculateFrictionAndNonPenetrationConstraintProperties(float inDeltaTime, Vec3Arg inGravity, const Body &inBody1, const Body &inBody2, float inInvM1, float inInvM2, Mat44Arg inInvI1, Mat44Arg inInvI2, RVec3Arg inWorldSpacePosition1, RVec3Arg inWorldSpacePosition2, Vec3Arg inWorldSpaceNormal, Vec3Arg inWorldSpaceTangent1, Vec3Arg inWorldSpaceTangent2, const ContactSettings &inSettings, float inMinVelocityForRestitution, float inContactSeparationTarget, float inContactVelocityBiasFactorOutsideTarget, float inContactVelocityBiasFactorInsideTarget, float inContactRescueVelocityFactor, bool inAllowContactRescue, bool inAllowRestitution);
 
 		/// The constraint parts
@@ -483,6 +509,8 @@ private:
 
 		/// Contact cache
 		CachedContactPoint *	mContactPoint;
+		bool					mAllowContactRescue = false;
+		bool					mAllowRestitution = false;
 	};
 
 	class ContactConstraintBase
@@ -523,6 +551,9 @@ private:
 		uint32					mNumContactPoints;
 		bool					mContactImpacting = false;
 		bool					mContactHasCachedSupport = false;
+		bool					mTrackContactResponse = false;
+		bool					mResponseEstablished = false;
+		bool					mImpactResponseThisStep = false;
 		bool					mUseVPhysicsSolver = false;
 		bool					mUseLegacyFriction = false;
 		bool					mDisablePenetrationRecovery = false;
@@ -588,11 +619,25 @@ private:
 	template <EMotionType Type1, EMotionType Type2, bool SolveFriction, bool SolveNonPenetration>
 	static bool					sSolveVelocityConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2);
 
+	template <EMotionType Type1, EMotionType Type2, bool SolveFriction, bool SolveNonPenetration>
+	static bool					sSolveContactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2);
+
+	template <EMotionType Type1, EMotionType Type2>
+	static bool					sDispatchContactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, const std::function<bool()> &inResponse, bool inLegacyImpact);
+
 	template <EMotionType Type1, EMotionType Type2>
 	static bool					sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget, float inInterpenetrationRescueSpeed, uint32 &ioRemainingSystemImpacts, VPhysicsSolverStats &ioStats);
 
+	template <EMotionType Type1, EMotionType Type2>
+	static bool					sSolveVPhysicsImpactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget, float inInterpenetrationRescueSpeed, uint32 &ioRemainingSystemImpacts, VPhysicsSolverStats &ioStats);
+
 	template <bool SolveFriction, bool SolveNonPenetration, bool PersistentOnly>
 	bool						TemplatedSolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+
+	/// Check the projected normal-velocity residual without changing the contact.
+	template <EMotionType Type1, EMotionType Type2>
+	static bool					sHasVelocityConstraintError(const ContactConstraintBase &inConstraint, float inTolerance);
+	bool						HasVelocityConstraintError(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, float inTolerance) const;
 
 	template <EMotionType Type1, EMotionType Type2>
 	static bool					sSolveLegacyFrictionConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime);
