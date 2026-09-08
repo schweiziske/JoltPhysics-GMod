@@ -292,6 +292,14 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 	// Number of integrate velocity jobs depends on number of active bodies.
 	int num_integrate_velocity_jobs = max(1, min(((int)num_active_rigid_bodies + cIntegrateVelocityBatchSize - 1) / cIntegrateVelocityBatchSize, max_concurrency));
 
+	// Avoid a full pool of mostly empty solver jobs in small worlds. This only
+	// changes scheduling: every island and splitter batch is still consumed.
+	// Account for constraint work as well as the initially awake bodies. Bodies
+	// activated later in the update are still processed by these same jobs.
+	constexpr uint32 cSolverBodiesPerJob = 64;
+	const uint32 solver_work = max(num_active_rigid_bodies, mConstraintManager.GetNumConstraints());
+	const int num_solve_jobs = max(1, min(int((solver_work + cSolverBodiesPerJob - 1) / cSolverBodiesPerJob), max_concurrency));
+
 	{
 		JPH_PROFILE("Build Jobs");
 
@@ -517,8 +525,8 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 			}
 
 			// This job will solve the velocity constraints
-			step.mSolveVelocityConstraints.resize(max_concurrency);
-			for (int i = 0; i < max_concurrency; ++i)
+			step.mSolveVelocityConstraints.resize(num_solve_jobs);
+			for (int i = 0; i < num_solve_jobs; ++i)
 				step.mSolveVelocityConstraints[i] = inJobSystem->CreateJob("SolveVelocityConstraints", cColorSolveVelocityConstraints, [&context, &step]()
 					{
 						context.mPhysicsSystem->JobSolveVelocityConstraints(&context, &step);
@@ -539,7 +547,7 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 					context.mPhysicsSystem->JobPreIntegrateVelocity(&context, &step);
 
 					JobHandle::sRemoveDependencies(step.mIntegrateVelocity);
-				}, 2 + max_concurrency); // depends on: broadphase update finalize, solve velocity constraints, finish building jobs.
+				}, 2 + num_solve_jobs); // depends on: broadphase update finalize, solve velocity constraints, finish building jobs.
 
 			// Unblock previous jobs
 			step.mUpdateBroadphaseFinalize.RemoveDependency();
@@ -582,8 +590,8 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 			step.mPostIntegrateVelocity.RemoveDependency();
 
 			// Fixes up drift in positions and updates the broadphase with new body positions
-			step.mSolvePositionConstraints.resize(max_concurrency);
-			for (int i = 0; i < max_concurrency; ++i)
+			step.mSolvePositionConstraints.resize(num_solve_jobs);
+			for (int i = 0; i < num_solve_jobs; ++i)
 				step.mSolvePositionConstraints[i] = inJobSystem->CreateJob("SolvePositionConstraints", cColorSolvePositionConstraints, [&context, &step]()
 					{
 						context.mPhysicsSystem->JobSolvePositionConstraints(&context, &step);
@@ -601,7 +609,7 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 			step.mSoftBodyPrepare = inJobSystem->CreateJob("SoftBodyPrepare", cColorSoftBodyPrepare, [&context, &step]()
 				{
 					context.mPhysicsSystem->JobSoftBodyPrepare(&context, &step);
-				}, max_concurrency); // depends on: solve position constraints.
+				}, num_solve_jobs); // depends on: solve position constraints.
 
 			// Unblock previous jobs
 			JobHandle::sRemoveDependencies(step.mSolvePositionConstraints);
