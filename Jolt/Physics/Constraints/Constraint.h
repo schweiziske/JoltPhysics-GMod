@@ -226,6 +226,12 @@ public:
 	virtual size_t				GetLegacySolverStorageAlignment() const { return 1; }
 	virtual void				InitializeLegacySolverStorage(void *) const { }
 	virtual void				DestroyLegacySolverStorage(void *) const { }
+	/// Opt-in preparation of geometry/effective mass only. This may run concurrently with
+	/// preparation of constraints sharing bodies, but never with their velocity solves.
+	/// Storage is already initialized. Implementations must not read velocities, change bodies
+	/// or call application callbacks, and SetupAndSolve must consume the prepared work once.
+	virtual bool				CanPrepareLegacyVelocityConstraint() const { return false; }
+	virtual void				PrepareLegacyVelocityConstraint(void *, float inDeltaTime) { }
 	/// Source's setup_and_step_constraint and step_constraint entry points. Native Jolt
 	/// constraints retain the existing virtual solve through these defaults.
 	virtual bool				SetupAndSolveLegacyVelocityConstraint(void *, float inDeltaTime, float inTauFactor, float inDampingFactor)
@@ -313,6 +319,9 @@ private:
 	LegacyConstraintGroup *		mLegacyConstraintGroup = nullptr;
 	size_t						mLegacyGroupIndex = 0;
 	bool						mLegacyPostContactSolveInIsland = false;
+	/// Transient storage borrowed from the current island preparation scope. Cleared before
+	/// its dispatcher returns, including when a group breaks or a member becomes inactive.
+	bool						mLegacySolverStoragePrepared = false;
 
 	bool						CheckLegacyBreakAfterSolve(Vec3Arg inLinearVelocity1, Vec3Arg inAngularVelocity1, Vec3Arg inLinearVelocity2, Vec3Arg inAngularVelocity2, bool inRollbackOnBreak);
 };
@@ -329,11 +338,16 @@ public:
 	void					SetAdditionalIterations(int inAdditionalIterations) { mAdditionalIterations = inAdditionalIterations; }
 	int						GetAdditionalIterations() const { return mAdditionalIterations; }
 	size_t					GetConstraintCount() const { return mConstraints.size(); }
+	/// Read-only access for dependency analysis and scheduling. The returned list is
+	/// immutable while a physics update is in progress.
+	const std::vector<Constraint *> &GetConstraints() const { return mConstraints; }
+	void					CollectConstraints(std::vector<Constraint *> &out) const { out.insert(out.end(), mConstraints.begin(), mConstraints.end()); }
 	void					SetRollbackOnBreak(bool inRollbackOnBreak) { mRollbackOnBreak = inRollbackOnBreak; }
 	bool					SolveVelocityConstraints(Constraint *const *inMembers, size_t inMemberCount, float inDeltaTime);
 
 private:
 	friend class Constraint;
+	friend class ConstraintManager;
 
 	struct SolverEntry
 	{

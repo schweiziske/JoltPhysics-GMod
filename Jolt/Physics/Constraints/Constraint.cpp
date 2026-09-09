@@ -255,12 +255,13 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *const *inMember
 		return a.mConstraintIndex < b.mConstraintIndex;
 	});
 	for (const SolverEntry &entry : active_entries)
-		if (entry.mStorage != nullptr)
+		if (entry.mStorage != nullptr && !entry.mConstraint->mLegacySolverStoragePrepared)
 			entry.mConstraint->InitializeLegacySolverStorage(entry.mStorage);
+
 	auto destroy_solver_storage = [&]()
 	{
 		for (const SolverEntry &entry : active_entries)
-			if (entry.mStorage != nullptr)
+			if (entry.mStorage != nullptr && !entry.mConstraint->mLegacySolverStoragePrepared)
 				entry.mConstraint->DestroyLegacySolverStorage(entry.mStorage);
 	};
 	const bool traceGroupSolves = IsLegacyGroupSolveTraceEnabled();

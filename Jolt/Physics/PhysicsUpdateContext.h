@@ -160,6 +160,9 @@ public:
 	float					mStepDeltaTime;											///< Delta time for a simulation step (collision step)
 	float					mWarmStartImpulseRatio;									///< Ratio of this step delta time vs last step
 	atomic<uint32>			mErrors { 0 };											///< Errors that occurred during the update, actual type is EPhysicsUpdateError
+	/// Bound cumulative helper publication, not just simultaneous execution: Update's owner
+	/// may itself be inside an island job and unable to retire completed barrier-ring entries.
+	atomic<uint>			mLegacyConstraintJobBudget { cMaxConcurrency };
 
 	Constraint **			mActiveConstraints = nullptr;							///< Constraints that were active at the start of the physics update step (activating bodies can activate constraints and we need a consistent snapshot). Only these constraints will be resolved.
 

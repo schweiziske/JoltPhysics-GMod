@@ -7,6 +7,7 @@
 #include <Jolt/Physics/Constraints/Constraint.h>
 #include <Jolt/Physics/PhysicsLock.h>
 #include <Jolt/Core/Mutex.h>
+#include <Jolt/Core/JobSystem.h>
 
 JPH_NAMESPACE_BEGIN
 
@@ -70,7 +71,10 @@ public:
 
 	/// Execute one Havana controller pass using only members of the current Jolt island.
 	/// The caller owns the once-per-step boundary; no group representative can schedule remote work.
-	static bool				sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime);
+	/// Optional jobs use the existing Update barrier. A complete group remains indivisible;
+	/// only components that do not share any writable body may execute concurrently. The
+	/// shared per-Update budget bounds cumulative additions to the existing barrier ring.
+	static bool				sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, JobSystem *inJobSystem = nullptr, JobSystem::Barrier *inBarrier = nullptr, atomic<uint> *ioJobBudget = nullptr);
 
 	/// Refresh predictive micro-angle members after contacts. This removes contact-generated angular
 	/// velocity without moving an otherwise mixed Weld/Rope group to the post-contact controller stage.

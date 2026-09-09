@@ -1701,7 +1701,8 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 						}
 						if (has_legacy_constraints)
 						{
-							applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
+							applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time,
+								ioContext->mJobSystem, ioContext->mBarrier, &ioContext->mLegacyConstraintJobBudget);
 							trace_legacy_bodies("after_havana");
 						}
 					}
@@ -1872,7 +1873,12 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 						uint32 ccd_body_idx = ioStep->mNumCCDBodies++;
 						JPH_ASSERT(active_body_idx < ioStep->mNumActiveBodyToCCDBody);
 						ioStep->mActiveBodyToCCDBody[active_body_idx] = ccd_body_idx;
-						new (&ioStep->mCCDBodies[ccd_body_idx]) CCDBody(body_id, delta_pos, linear_cast_threshold_sq, min(mPhysicsSettings.mPenetrationSlop, mPhysicsSettings.mLinearCastMaxPenetration * inner_radius));
+						// The discrete position slop may be zero (Source contact policy).
+						// A sweep still needs the precision allowance used by its manifold:
+						// otherwise a negligible inward floor component can consume all
+						// tangential travel at fraction zero. Keep the shape radius bound.
+						const float ccd_allowance = max(mPhysicsSettings.mPenetrationSlop, mPhysicsSettings.mManifoldTolerance);
+						new (&ioStep->mCCDBodies[ccd_body_idx]) CCDBody(body_id, delta_pos, linear_cast_threshold_sq, min(ccd_allowance, mPhysicsSettings.mLinearCastMaxPenetration * inner_radius));
 
 						update_position = false;
 					}
@@ -2044,19 +2050,18 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 					// Normalize normal
 					Vec3 normal = inResult.mPenetrationAxis.Normalized();
 
-					// Calculate how much we can add to the fraction to penetrate the collision point by mMaxPenetration.
-					// Note that the normal is pointing towards body 2!
-					// Let the extra distance that we can travel along delta_pos be 'dist': mMaxPenetration / dist = cos(angle between normal and delta_pos) = normal . delta_pos / |delta_pos|
-					// <=> dist = mMaxPenetration * |delta_pos| / normal . delta_pos
-					// Converting to a faction: delta_fraction = dist / |delta_pos| = mLinearCastTreshold / normal . delta_pos
-					float denominator = normal.Dot(mCCDBody.mDeltaPosition);
+					// The hit fraction comes from the relative shape cast. Use the same
+					// relative travel for its approach test and precision allowance.
+					// A faster body can approach from behind while our own travel points
+					// away from the contact normal; own travel would discard that hit.
+					const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
+					const Vec3 relative_movement = mCCDBody.mDeltaPosition - sCalculateBodyMotion(body2, mDeltaTime);
+					float denominator = normal.Dot(relative_movement);
 					if (denominator > mCCDBody.mMaxPenetration) // Avoid dividing by zero, if extra hit fraction > 1 there's also no point in continuing
 					{
 						float fraction_plus_slop = fraction + mCCDBody.mMaxPenetration / denominator;
 						if (fraction_plus_slop < mCCDBody.mFractionPlusSlop)
 						{
-							const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
-
 							// Check if we've already accepted all hits from this body
 							if (mValidateBodyPair)
 							{
