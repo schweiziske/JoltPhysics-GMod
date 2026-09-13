@@ -96,6 +96,7 @@ static const Color cColorSoftBodyPrepare = Color::sGetDistinctColor(20);
 static const Color cColorSoftBodyCollide = Color::sGetDistinctColor(21);
 static const Color cColorSoftBodySimulate = Color::sGetDistinctColor(22);
 static const Color cColorSoftBodyFinalize = Color::sGetDistinctColor(23);
+static const Color cColorPropagateConstraintWake = Color::sGetDistinctColor(24);
 
 PhysicsSystem::~PhysicsSystem()
 {
@@ -390,7 +391,7 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 						context.mPhysicsSystem->JobApplyGravity(&context, &step);
 
 						JobHandle::sRemoveDependencies(step.mFindCollisions);
-					}, num_step_listener_jobs > 0? num_step_listener_jobs : previous_step_dependency_count); // depends on: step listeners (or previous step if no step listeners)
+					}, 1); // depends on: propagate constraint wake (after listeners / previous step)
 
 			// This job will setup velocity constraints for non-collision constraints
 			step.mSetupVelocityConstraints.resize(num_setup_velocity_constraints_jobs);
@@ -423,7 +424,23 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 						// Kick these jobs last as they will use up all CPU cores leaving no space for the previous job, we prefer setup velocity constraints to finish first so we kick it first
 						JobHandle::sRemoveDependencies(step.mSetupVelocityConstraints);
 						JobHandle::sRemoveDependencies(step.mFindCollisions);
-					}, num_step_listener_jobs > 0? num_step_listener_jobs : previous_step_dependency_count); // depends on: step listeners (or previous step if no step listeners)
+					}, 1); // depends on: propagate constraint wake (after listeners / previous step)
+
+			// Close the complete wake graph before any worker freezes the active constraint list.
+			// Listeners may wake bodies, including in later collision substeps. Do not put this
+			// in BuildIslandsFromConstraints: wholly sleeping member constraints are absent by then.
+			step.mPropagateConstraintWake = inJobSystem->CreateJob("PropagateConstraintWake", cColorPropagateConstraintWake, [this, &step]()
+				{
+				#ifdef JPH_ENABLE_ASSERTS
+					BodyAccess::Grant grant(BodyAccess::EAccess::ReadWrite, BodyAccess::EAccess::Read);
+					BodyManager::GrantActiveBodiesAccess grant_active(true, false);
+				#endif
+					mConstraintManager.PropagateWake(mBodyManager);
+					// These wakes belong to the start of this step and receive gravity once.
+					step.mNumActiveBodiesAtStepStart = mBodyManager.GetNumActiveBodies(EBodyType::RigidBody);
+					JobHandle::sRemoveDependencies(step.mApplyGravity);
+					JobHandle::sRemoveDependencies(step.mDetermineActiveConstraints);
+				}, 1 + (num_step_listener_jobs > 0? num_step_listener_jobs : previous_step_dependency_count)); // listeners (or previous step), finish building wake/listener jobs
 
 			// This job calls the step listeners
 			step.mStepListeners.resize(num_step_listener_jobs);
@@ -433,10 +450,11 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 						// Call the step listeners
 						context.mPhysicsSystem->JobStepListeners(&step);
 
-						// Kick apply gravity and determine active constraint jobs
-						JobHandle::sRemoveDependencies(step.mApplyGravity);
-						JobHandle::sRemoveDependencies(step.mDetermineActiveConstraints);
+						// Only the completed listener set may release native wake propagation.
+						step.mPropagateConstraintWake.RemoveDependency();
 					}, previous_step_dependency_count);
+
+			step.mPropagateConstraintWake.RemoveDependency();
 
 			// Unblock the previous step
 			if (!is_first_step)
@@ -512,9 +530,8 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 						next_step->mBroadPhasePrepare.RemoveDependency();
 						if (next_step->mStepListeners.empty())
 						{
-							// Kick the gravity and active constraints jobs immediately
-							JobHandle::sRemoveDependencies(next_step->mApplyGravity);
-							JobHandle::sRemoveDependencies(next_step->mDetermineActiveConstraints);
+							// Wake propagation must finish before gravity / active constraints.
+							next_step->mPropagateConstraintWake.RemoveDependency();
 						}
 						else
 						{
@@ -628,6 +645,7 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 				handles.push_back(step.mBroadPhasePrepare);
 			for (const JobHandle &h : step.mStepListeners)
 				handles.push_back(h);
+			handles.push_back(step.mPropagateConstraintWake);
 			for (const JobHandle &h : step.mDetermineActiveConstraints)
 				handles.push_back(h);
 			for (const JobHandle &h : step.mApplyGravity)
@@ -814,8 +832,8 @@ void PhysicsSystem::JobApplyGravity(const PhysicsUpdateContext *ioContext, Physi
 	BodyAccess::Grant grant(BodyAccess::EAccess::ReadWrite, BodyAccess::EAccess::Read);
 #endif
 
-	// Get list of active bodies that we had at the start of the physics update.
-	// Any body that is activated as part of the simulation step does not receive gravity this frame.
+	// Get the active list captured after step listeners and constraint wake propagation.
+	// Bodies activated later (e.g. by collisions) do not receive gravity this step.
 	// Note that bodies may be activated during this job but not deactivated, this means that only elements
 	// will be added to the array. Since the array is made to not reallocate, this is a safe operation.
 	const BodyID *active_bodies = mBodyManager.GetActiveBodiesUnsafe(EBodyType::RigidBody);

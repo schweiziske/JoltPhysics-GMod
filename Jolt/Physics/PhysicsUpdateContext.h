@@ -64,7 +64,7 @@ public:
 
 		BroadPhase::UpdateState	mBroadPhaseUpdateState;								///< Handle returned by Broadphase::UpdatePrepare
 
-		uint32				mNumActiveBodiesAtStepStart;							///< Number of bodies that were active at the start of the physics update step. Only these bodies will receive gravity (they are the first N in the active body list).
+		uint32				mNumActiveBodiesAtStepStart;							///< Active count after listeners / constraint wake propagation. Only these first N bodies receive gravity this step.
 
 		atomic<uint32>		mDetermineActiveConstraintReadIdx { 0 };				///< Next constraint for determine active constraints
 		uint8				mPadding1[JPH_CACHE_LINE_SIZE - sizeof(atomic<uint32>)];///< Padding to avoid sharing cache line with the next atomic
@@ -125,6 +125,7 @@ public:
 		// Jobs in order of execution (some run in parallel)
 		JobHandle			mBroadPhasePrepare;										///< Prepares the new tree in the background
 		JobHandleArray		mStepListeners;											///< Listeners to notify of the beginning of a physics step
+		JobHandle			mPropagateConstraintWake;								///< Close constraint/group wakes before gravity and the active-constraint snapshot
 		JobHandleArray		mDetermineActiveConstraints;							///< Determine which constraints will be active during this step
 		JobHandleArray		mApplyGravity;											///< Update velocities of bodies with gravity
 		JobHandleArray		mFindCollisions;										///< Find all collisions between active bodies an the world

@@ -5,14 +5,17 @@
 #pragma once
 
 #include <Jolt/Physics/Constraints/Constraint.h>
+#include <Jolt/Physics/Body/BodyID.h>
 #include <Jolt/Physics/PhysicsLock.h>
 #include <Jolt/Core/Mutex.h>
 #include <Jolt/Core/JobSystem.h>
+#include <Jolt/Core/UnorderedMap.h>
 
 JPH_NAMESPACE_BEGIN
 
 class IslandBuilder;
 class BodyManager;
+class Body;
 class StateRecorderFilter;
 #ifdef JPH_DEBUG_RENDERER
 class DebugRenderer;
@@ -47,6 +50,11 @@ public:
 
 	/// Get total number of constraints
 	inline uint32			GetNumConstraints() const					{ return uint32(mConstraints.size()); }
+
+	/// Close enabled two-body and legacy-group dynamic wake components before the active
+	/// constraint snapshot. The caller holds all body/constraint locks and grants activation.
+	/// This does not join solver islands or change legacy solver member slices.
+	void					PropagateWake(BodyManager &ioBodyManager);
 
 	/// Determine the active constraints of a subset of the constraints
 	void					GetActiveConstraints(uint32 inStartConstraintIdx, uint32 inEndConstraintIdx, Constraint **outActiveConstraints, uint32 &outNumActiveConstraints) const;
@@ -109,6 +117,26 @@ public:
 	void					UnlockAllConstraints()						{ PhysicsLock::sUnlock(mConstraintsMutex JPH_IF_ENABLE_ASSERTS(, mLockContext, EPhysicsLockTypes::ConstraintsList)); }
 
 private:
+	struct WakeNode
+	{
+		BodyID				mBodyID;
+		uint32				mParent;
+		uint32				mSize = 1;
+		bool				mHasActiveBody;
+		bool				mHasSleepingBody;
+	};
+
+	uint32					GetOrCreateWakeNode(const Body &inBody);
+	uint32					FindWakeRoot(uint32 inNode);
+	void					LinkWakeNodes(uint32 inNode1, uint32 inNode2);
+
+	// Reused capacity only, never cached connectivity: rebuild from live world constraints.
+	Array<WakeNode>			mWakeNodes;
+	UnorderedMap<uint32, uint32> mWakeNodeByBody;
+	UnorderedMap<const LegacyConstraintGroup *, uint8> mWakeGroupState;
+	UnorderedMap<const LegacyConstraintGroup *, uint32> mWakeFirstNodeByGroup;
+	Array<BodyID>			mWakeActivationBatch;
+
 #ifdef JPH_ENABLE_ASSERTS
 	PhysicsLockContext		mLockContext;
 #endif // JPH_ENABLE_ASSERTS

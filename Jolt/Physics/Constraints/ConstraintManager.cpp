@@ -7,6 +7,8 @@
 #include <Jolt/Physics/Constraints/ConstraintManager.h>
 #include <Jolt/Physics/Constraints/CalculateSolverSteps.h>
 #include <Jolt/Physics/Constraints/TwoBodyConstraint.h>
+#include <Jolt/Physics/Constraints/PathConstraint.h>
+#include <Jolt/Physics/Body/BodyManager.h>
 #include <Jolt/Physics/IslandBuilder.h>
 #include <Jolt/Physics/StateRecorder.h>
 #include <Jolt/Physics/PhysicsLock.h>
@@ -70,6 +72,149 @@ Constraints ConstraintManager::GetConstraints() const
 
 	Constraints copy = mConstraints;
 	return copy;
+}
+
+namespace
+{
+	bool IsWakeLinkEnabled(const Constraint &inConstraint)
+	{
+		if (inConstraint.GetType() != EConstraintType::TwoBodyConstraint || !inConstraint.GetEnabled())
+			return false;
+		return inConstraint.GetSubType() != EConstraintSubType::Path
+			|| static_cast<const PathConstraint &>(inConstraint).GetPath() != nullptr;
+	}
+
+	const LegacyConstraintGroup *GetWakeGroup(const Constraint &inConstraint)
+	{
+		const LegacyConstraintGroup *group = inConstraint.GetLegacyConstraintGroup();
+		// A private single-constraint group adds nothing to its ordinary dynamic edge.
+		// Read the live count so 1 -> 2 -> 1 membership changes take effect this step.
+		return group != nullptr && group->GetConstraintCount() > 1? group : nullptr;
+	}
+}
+
+void ConstraintManager::PropagateWake(BodyManager &ioBodyManager)
+{
+	JPH_PROFILE_FUNCTION();
+
+	// No active rigid body means no dynamic wake seed. Do not copy or scan the list.
+	if (ioBodyManager.GetNumActiveBodies(EBodyType::RigidBody) == 0 || mConstraints.empty())
+		return;
+
+	constexpr uint8 cActive = 1, cSleeping = 2;
+	mWakeGroupState.clear();
+	bool has_wake_frontier = false;
+	for (const Ref<Constraint> &constraint : mConstraints)
+	{
+		if (!IsWakeLinkEnabled(*constraint))
+			continue;
+		const TwoBodyConstraint &two_body = static_cast<const TwoBodyConstraint &>(*constraint);
+		const Body *body1 = two_body.GetBody1(), *body2 = two_body.GetBody2();
+		if (body1->IsDynamic() && body2->IsDynamic() && body1->IsActive() != body2->IsActive())
+		{
+			has_wake_frontier = true;
+			break;
+		}
+		if (const LegacyConstraintGroup *group = GetWakeGroup(*constraint))
+		{
+			uint8 state = 0;
+			if (body1->IsDynamic()) state |= body1->IsActive()? cActive : cSleeping;
+			if (body2->IsDynamic()) state |= body2->IsActive()? cActive : cSleeping;
+			if (state == 0)
+				continue;
+			uint8 &group_state = mWakeGroupState[group];
+			group_state |= state;
+			if (group_state == (cActive | cSleeping))
+			{
+				has_wake_frontier = true;
+				break;
+			}
+		}
+	}
+	if (!has_wake_frontier)
+		return;
+
+	mWakeNodes.clear();
+	mWakeNodeByBody.clear();
+	mWakeFirstNodeByGroup.clear();
+	mWakeActivationBatch.clear();
+	for (const Ref<Constraint> &constraint : mConstraints)
+	{
+		// IsActive() would omit wholly sleeping links and only wake one wave per step.
+		if (!IsWakeLinkEnabled(*constraint))
+			continue;
+		const TwoBodyConstraint &two_body = static_cast<const TwoBodyConstraint &>(*constraint);
+		const Body *body1 = two_body.GetBody1(), *body2 = two_body.GetBody2();
+		if (body1->IsDynamic() && body2->IsDynamic())
+		{
+			const uint32 node1 = GetOrCreateWakeNode(*body1);
+			const uint32 node2 = GetOrCreateWakeNode(*body2);
+			LinkWakeNodes(node1, node2);
+		}
+		if (const LegacyConstraintGroup *group = GetWakeGroup(*constraint))
+		{
+			// Group dynamic members share a wake state even when separately anchored.
+			// Static/kinematic endpoints are neither seeds nor bridges between groups.
+			auto link_group_body = [&](const Body &inBody)
+			{
+				if (!inBody.IsDynamic())
+					return;
+				const uint32 node = GetOrCreateWakeNode(inBody);
+				auto [entry, inserted] = mWakeFirstNodeByGroup.try_emplace(group, node);
+				if (!inserted)
+					LinkWakeNodes(entry->second, node);
+			};
+			link_group_body(*body1);
+			link_group_body(*body2);
+		}
+	}
+
+	for (uint32 index = 0; index < uint32(mWakeNodes.size()); ++index)
+	{
+		const WakeNode &root = mWakeNodes[FindWakeRoot(index)];
+		if (root.mHasActiveBody && root.mHasSleepingBody)
+			mWakeActivationBatch.push_back(mWakeNodes[index].mBodyID);
+	}
+	// Include awake members to reset the component's sleep timers together. Activation
+	// callbacks are emitted only for bodies that were actually sleeping.
+	ioBodyManager.ActivateBodies(mWakeActivationBatch.data(), int(mWakeActivationBatch.size()));
+}
+
+uint32 ConstraintManager::GetOrCreateWakeNode(const Body &inBody)
+{
+	const uint32 index = uint32(mWakeNodes.size());
+	auto [entry, inserted] = mWakeNodeByBody.try_emplace(inBody.GetID().GetIndexAndSequenceNumber(), index);
+	if (inserted)
+		mWakeNodes.push_back({ inBody.GetID(), index, 1, inBody.IsActive(), !inBody.IsActive() });
+	return entry->second;
+}
+
+uint32 ConstraintManager::FindWakeRoot(uint32 inNode)
+{
+	uint32 root = inNode;
+	while (mWakeNodes[root].mParent != root)
+		root = mWakeNodes[root].mParent;
+	while (mWakeNodes[inNode].mParent != inNode)
+	{
+		const uint32 parent = mWakeNodes[inNode].mParent;
+		mWakeNodes[inNode].mParent = root;
+		inNode = parent;
+	}
+	return root;
+}
+
+void ConstraintManager::LinkWakeNodes(uint32 inNode1, uint32 inNode2)
+{
+	uint32 root1 = FindWakeRoot(inNode1), root2 = FindWakeRoot(inNode2);
+	if (root1 == root2)
+		return;
+	if (mWakeNodes[root1].mSize < mWakeNodes[root2].mSize)
+		std::swap(root1, root2);
+	WakeNode &parent = mWakeNodes[root1], &child = mWakeNodes[root2];
+	child.mParent = root1;
+	parent.mSize += child.mSize;
+	parent.mHasActiveBody |= child.mHasActiveBody;
+	parent.mHasSleepingBody |= child.mHasSleepingBody;
 }
 
 void ConstraintManager::GetActiveConstraints(uint32 inStartConstraintIdx, uint32 inEndConstraintIdx, Constraint **outActiveConstraints, uint32 &outNumActiveConstraints) const
