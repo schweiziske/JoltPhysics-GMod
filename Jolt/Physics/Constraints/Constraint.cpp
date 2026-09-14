@@ -8,6 +8,7 @@
 #include <Jolt/Physics/Constraints/ConstraintManager.h>
 #include <Jolt/Physics/Constraints/TwoBodyConstraint.h>
 #include <Jolt/Physics/Constraints/LegacyBreakableState.h>
+#include <Jolt/Physics/VelocityDiagnostics.h>
 #include <Jolt/Physics/StateRecorder.h>
 #include <Jolt/ObjectStream/TypeDeclarations.h>
 #include <Jolt/Core/StreamUtils.h>
@@ -319,7 +320,7 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *const *inMember
 		++solveOrdinal;
 		Constraint *constraint = entry.mConstraint;
 		const bool check_break = constraint->HasLegacyBreakLimits();
-		const bool capture_body_state = traceGroupSolves || check_break;
+		const bool capture_body_state = traceGroupSolves || check_break || VelocityDiagnostics::Enabled();
 		const TwoBodyConstraint *two_body = capture_body_state
 			&& constraint->GetType() == EConstraintType::TwoBodyConstraint?
 				static_cast<const TwoBodyConstraint *>(constraint) : nullptr;
@@ -327,11 +328,18 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *const *inMember
 		const Vec3 angular1 = two_body? two_body->GetBody1()->GetAngularVelocity() : Vec3::sZero();
 		const Vec3 linear2 = two_body? two_body->GetBody2()->GetLinearVelocity() : Vec3::sZero();
 		const Vec3 angular2 = two_body? two_body->GetBody2()->GetAngularVelocity() : Vec3::sZero();
-		appliedImpulse |= setup
-			? constraint->SetupAndSolveLegacyVelocityConstraint(
-				entry.mStorage, inDeltaTime, tauFactor, dampingFactor)
-			: constraint->StepLegacyVelocityConstraint(
-				entry.mStorage, inDeltaTime, tauFactor, dampingFactor);
+		const auto solve = [&]() {
+			return setup
+				? constraint->SetupAndSolveLegacyVelocityConstraint(
+					entry.mStorage, inDeltaTime, tauFactor, dampingFactor)
+				: constraint->StepLegacyVelocityConstraint(
+					entry.mStorage, inDeltaTime, tauFactor, dampingFactor);
+		};
+		appliedImpulse |= two_body && VelocityDiagnostics::Enabled()
+			? VelocityDiagnostics::Observe(setup? "havana-setup" : "havana-step",
+				uint32(entry.mConstraintIndex), *two_body->GetBody1(), *two_body->GetBody2(), solve,
+				uint32(constraint->GetSubType()))
+			: solve();
 		if (traceGroupSolves && two_body)
 		{
 			const Vec3 postLinear1 = two_body->GetBody1()->GetLinearVelocity();
