@@ -159,15 +159,17 @@ bool Constraint::CheckLegacyBreakAfterSolve(Vec3Arg inLinearVelocity1, Vec3Arg i
 		|| body_breaks(*body2, inLinearVelocity2, inAngularVelocity2))
 	{
 		// A standalone Source constraint owns a one-member local system. Its synchronous game
-		// callback deactivates that system, so the wrapper restores both bodies to the velocity
+		// callback deactivates that system, so the wrapper restores dynamic bodies to the velocity
 		// snapshot from immediately before this pass. Shared LCS breaking is explicitly marked as
 		// unsupported in Valve's adapter and is kept as a separate compatibility item.
-		if (inRollbackOnBreak && !body1->IsStatic())
+		// Kinematic velocities are read-only during constraint solving and may be read by
+		// other islands sharing the same anchor, even when restoring an identical value.
+		if (inRollbackOnBreak && body1->IsDynamic())
 		{
 			body1->SetLinearVelocity(inLinearVelocity1);
 			body1->SetAngularVelocity(inAngularVelocity1);
 		}
-		if (inRollbackOnBreak && !body2->IsStatic())
+		if (inRollbackOnBreak && body2->IsDynamic())
 		{
 			body2->SetLinearVelocity(inLinearVelocity2);
 			body2->SetAngularVelocity(inAngularVelocity2);

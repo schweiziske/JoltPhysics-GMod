@@ -437,10 +437,10 @@ bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveCon
 				}
 				const auto *two_body = static_cast<const TwoBodyConstraint *>(c);
 				for (const Body *body : { two_body->GetBody1(), two_body->GetBody2() })
-					if (!body->IsStatic())
+					if (body->IsDynamic())
 					{
-						// Include kinematic bodies: the existing break rollback restores their
-						// velocities too. Sharing a read-only static/world anchor is safe.
+						// Solving and break rollback only write dynamic bodies. Static/world and
+						// kinematic anchors can be shared without coupling these groups.
 						auto [entry, inserted] = body_owners.try_emplace(body, i);
 						if (!inserted)
 						{
