@@ -17,7 +17,7 @@
 #include <Jolt/Core/UnorderedMap.h>
 #include <span>
 #include <memory>
-#include <thread>
+
 
 JPH_NAMESPACE_BEGIN
 
@@ -49,6 +49,7 @@ void ConstraintManager::Add(Constraint **inConstraints, int inNumber)
 		constraint->mConstraintIndex = uint32(mConstraints.size());
 		constraint->mConstraintManager = this;
 		mConstraints.push_back(constraint);
+		mNumLegacyPreparationConstraints += constraint->CanPrepareLegacyVelocityConstraint()? 1 : 0;
 	}
 }
 
@@ -61,6 +62,11 @@ void ConstraintManager::Remove(Constraint **inConstraints, int inNumber)
 		Constraint *constraint = *c;
 
 		// Reset constraint index for this constraint
+		if (constraint->CanPrepareLegacyVelocityConstraint())
+		{
+			JPH_ASSERT(mNumLegacyPreparationConstraints > 0);
+			--mNumLegacyPreparationConstraints;
+		}
 		uint32 this_constraint_idx = constraint->mConstraintIndex;
 		constraint->mConstraintIndex = Constraint::cInvalidConstraintIndex;
 		constraint->mConstraintManager = nullptr;
@@ -282,7 +288,7 @@ void ConstraintManager::sSortConstraints(Constraint **inActiveConstraints, uint3
 	});
 }
 
-void ConstraintManager::sSetupVelocityConstraints(Constraint **inActiveConstraints, uint32 inNumActiveConstraints, float inDeltaTime)
+void ConstraintManager::sSetupVelocityConstraints(Constraint **inActiveConstraints, uint32 inNumActiveConstraints, float inDeltaTime, bool inPrepareLegacy)
 {
 	JPH_PROFILE_FUNCTION();
 
@@ -290,6 +296,38 @@ void ConstraintManager::sSetupVelocityConstraints(Constraint **inActiveConstrain
 	{
 		(*c)->SetupVelocityConstraint(inDeltaTime);
 		(*c)->mLegacyPostContactSolveInIsland = false;
+		if (inPrepareLegacy && (*c)->GetLegacyConstraintGroup() != nullptr && (*c)->CanPrepareLegacyVelocityConstraint())
+		{
+			Constraint *constraint = *c;
+			LegacyConstraintGroup *group = constraint->GetLegacyConstraintGroup();
+			const size_t index = constraint->mLegacyGroupIndex;
+			JPH_ASSERT(!constraint->mLegacySolverStoragePrepared);
+			JPH_ASSERT(index < group->mConstraints.size() && group->mConstraints[index] == constraint);
+			const size_t offset = group->mSolverStorageOffsets[index];
+			if (offset != SIZE_MAX)
+			{
+				void *storage = reinterpret_cast<std::byte *>(group->mSolverStorage.data()) + offset;
+				constraint->InitializeLegacySolverStorage(storage);
+				constraint->PrepareLegacyVelocityConstraint(storage, inDeltaTime);
+				constraint->mLegacySolverStoragePrepared = true;
+			}
+		}
+	}
+}
+
+void ConstraintManager::sReleasePreparedLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd)
+{
+	for (const uint32 *index = inConstraintIdxBegin; index < inConstraintIdxEnd; ++index)
+	{
+		Constraint *constraint = inActiveConstraints[*index];
+		if (!constraint->mLegacySolverStoragePrepared)
+			continue;
+		LegacyConstraintGroup *group = constraint->GetLegacyConstraintGroup();
+		JPH_ASSERT(group != nullptr && group->mConstraints[constraint->mLegacyGroupIndex] == constraint);
+		void *storage = reinterpret_cast<std::byte *>(group->mSolverStorage.data())
+			+ group->mSolverStorageOffsets[constraint->mLegacyGroupIndex];
+		constraint->DestroyLegacySolverStorage(storage);
+		constraint->mLegacySolverStoragePrepared = false;
 	}
 }
 
@@ -337,14 +375,219 @@ bool ConstraintManager::sHasLegacyConstraints(Constraint **inActiveConstraints, 
 	return false;
 }
 
-bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, JobSystem *inJobSystem, JobSystem::Barrier *inBarrier, atomic<uint> *ioJobBudget)
+void ConstraintManager::LegacyVelocityBatch::Group::AddMember(Constraint *inConstraint)
+{
+	if (mFirstMember == nullptr)
+		mFirstMember = inConstraint;
+	else
+	{
+		if (mMembers.empty())
+			mMembers.push_back(mFirstMember);
+		mMembers.push_back(inConstraint);
+	}
+	mPostContact &= inConstraint->RequiresPostContactLegacySolve();
+}
+
+std::span<Constraint *const> ConstraintManager::LegacyVelocityBatch::Group::GetMembers() const
+{
+	return mMembers.empty()? std::span<Constraint *const>(&mFirstMember, 1)
+		: std::span<Constraint *const>(mMembers.data(), mMembers.size());
+}
+
+bool ConstraintManager::LegacyVelocityBatch::Group::Solve(float inDeltaTime)
+{
+	const auto members = GetMembers();
+	for (Constraint *c : members)
+		c->mLegacyPostContactSolveInIsland = mPostContact;
+	return mGroup->SolveVelocityConstraints(members.data(), members.size(), inDeltaTime);
+}
+
+void ConstraintManager::LegacyVelocityBatch::BuildGroups(Constraint **inActiveConstraints, const uint32 *inBegin, const uint32 *inEnd)
+{
+	UnorderedMap<LegacyConstraintGroup *, size_t> group_indices;
+	for (const uint32 *index = inBegin; index < inEnd; ++index)
+	{
+		Constraint *constraint = inActiveConstraints[*index];
+		if (LegacyConstraintGroup *group = constraint->GetLegacyConstraintGroup())
+		{
+			auto [entry, inserted] = group_indices.try_emplace(group, mGroups.size());
+			if (inserted)
+				mGroups.push_back({ group });
+			mGroups[entry->second].AddMember(constraint);
+		}
+	}
+}
+
+bool ConstraintManager::LegacyVelocityBatch::BuildLayers()
+{
+	if (mGroups.size() < 2)
+		return false;
+	std::vector<uint32> layers(mGroups.size());
+	UnorderedMap<const Body *, uint32> next_body_layer;
+	uint32 num_layers = 0;
+	// Preserve the effective controller order, not merely group insertion order.
+	for (bool post_contact : { false, true })
+		for (uint32 index = 0; index < mGroups.size(); ++index)
+		{
+			const Group &group = mGroups[index];
+			if (group.mPostContact != post_contact)
+				continue;
+			uint32 layer = 0;
+			for (Constraint *constraint : group.GetMembers())
+			{
+				if (constraint->GetType() != EConstraintType::TwoBodyConstraint)
+					return false;
+				const auto *two_body = static_cast<const TwoBodyConstraint *>(constraint);
+				for (const Body *body : { two_body->GetBody1(), two_body->GetBody2() })
+					if (body->IsDynamic())
+					{
+						auto previous = next_body_layer.find(body);
+						if (previous != next_body_layer.end())
+							layer = max(layer, previous->second);
+					}
+			}
+			// Read the complete group's dependencies before updating any endpoint, so
+			// repeated bodies within the same group cannot create a self-dependency.
+			for (Constraint *constraint : group.GetMembers())
+			{
+				const auto *two_body = static_cast<const TwoBodyConstraint *>(constraint);
+				for (const Body *body : { two_body->GetBody1(), two_body->GetBody2() })
+					if (body->IsDynamic())
+						next_body_layer[body] = layer + 1;
+			}
+			layers[index] = layer;
+			num_layers = max(num_layers, layer + 1);
+		}
+	if (num_layers == mGroups.size())
+		return false; // A genuine chain has no parallel width; keep its serial fast path.
+	mLayerEnds.resize(num_layers, 0);
+	for (uint32 layer : layers)
+		++mLayerEnds[layer];
+	for (uint32 layer = 1; layer < num_layers; ++layer)
+		mLayerEnds[layer] += mLayerEnds[layer - 1];
+	std::vector<uint32> next(num_layers, 0);
+	for (uint32 layer = 1; layer < num_layers; ++layer)
+		next[layer] = mLayerEnds[layer - 1];
+	mGroupIndices.resize(mGroups.size());
+	for (bool post_contact : { false, true })
+		for (uint32 index = 0; index < mGroups.size(); ++index)
+			if (mGroups[index].mPostContact == post_contact)
+				mGroupIndices[next[layers[index]]++] = index;
+	return true;
+}
+
+bool ConstraintManager::LegacyVelocityBatch::SolveSerial()
+{
+	bool applied = false;
+	for (bool post_contact : { false, true })
+		for (Group &group : mGroups)
+			if (group.mPostContact == post_contact)
+				applied |= group.Solve(mDeltaTime);
+	return applied;
+}
+
+bool ConstraintManager::LegacyVelocityBatch::TryExecute()
+{
+	uint64 cursor;
+	uint32 layer, index;
+	for (;;)
+	{
+		cursor = mCursor.load(memory_order_acquire);
+		if (cursor == UINT64_MAX)
+			return false;
+		layer = uint32(cursor >> 32);
+		index = uint32(cursor);
+		if (index >= mLayerEnds[layer])
+			return false; // Claimed groups are still running; try another island.
+		if (mCursor.compare_exchange_weak(cursor, cursor + 1, memory_order_acquire, memory_order_relaxed))
+			break;
+	}
+	JPH_PROFILE("HavanaGroup");
+	if (mGroups[mGroupIndices[index]].Solve(mDeltaTime))
+		mAppliedImpulse.store(true, memory_order_relaxed);
+	const uint32 layer_begin = layer == 0? 0 : mLayerEnds[layer - 1];
+	if (mProcessed.fetch_add(1, memory_order_acq_rel) + 1 == mLayerEnds[layer] - layer_begin)
+	{
+		if (layer + 1 < mLayerEnds.size())
+		{
+			mProcessed.store(0, memory_order_relaxed);
+			// Publish all this layer's velocity writes before any dependent group runs.
+			mCursor.store((uint64(layer + 1) << 32) | mLayerEnds[layer], memory_order_release);
+		}
+		else
+		{
+			// Only this last worker resumes contacts and releases prepared storage.
+			// Keep the consumed cursor until it returns: no second worker may resume it.
+			mContinuation(mAppliedImpulse.load(memory_order_relaxed));
+			mCursor.store(UINT64_MAX, memory_order_release);
+		}
+	}
+	return true;
+}
+
+void ConstraintManager::LegacyVelocityScheduler::Prepare(const IslandBuilder &inBuilder, Constraint **inActiveConstraints, bool inEnabled)
+{
+	Clear();
+	mEnabled = false;
+	mNumIslands = 0;
+	// Empty islands form a suffix in Jolt's sorted island list. They cannot publish work.
+	for (; mNumIslands < inBuilder.GetNumIslands(); ++mNumIslands)
+	{
+		uint32 *cb, *ce, *pb, *pe;
+		const bool constraints = inBuilder.GetConstraintsInIsland(mNumIslands, cb, ce);
+		const bool contacts = inBuilder.GetContactsInIsland(mNumIslands, pb, pe);
+		if (!constraints && !contacts)
+			break;
+		// The input only sizes publication slots here. Groups and their dependencies
+		// are built by the owning solver after deterministic constraint sorting.
+		if (!mEnabled && inEnabled && constraints && ce - cb >= 128)
+			mEnabled = sHasLegacyConstraints(inActiveConstraints, cb, ce);
+	}
+	if (mEnabled)
+		mBatches.resize(mNumIslands);
+	mRemainingIslands.store(mEnabled? mNumIslands : 0, memory_order_relaxed);
+}
+
+void ConstraintManager::LegacyVelocityScheduler::Clear()
+{
+	JPH_ASSERT(!HasPendingIslands());
+	mHead.store(nullptr, memory_order_relaxed);
+	mBatches.clear();
+}
+
+void ConstraintManager::LegacyVelocityScheduler::Publish(uint32 inIsland, std::unique_ptr<LegacyVelocityBatch> inBatch)
+{
+	JPH_ASSERT(mEnabled && inIsland < mBatches.size() && mBatches[inIsland] == nullptr);
+	LegacyVelocityBatch *batch = inBatch.get();
+	mBatches[inIsland] = std::move(inBatch);
+	LegacyVelocityBatch *head = mHead.load(memory_order_relaxed);
+	do { batch->mNext = head; }
+	while (!mHead.compare_exchange_weak(head, batch, memory_order_release, memory_order_relaxed));
+}
+
+bool ConstraintManager::LegacyVelocityScheduler::TryExecute()
+{
+	for (LegacyVelocityBatch *batch = mHead.load(memory_order_acquire); batch != nullptr; batch = batch->mNext)
+	{
+		if (batch->IsDone())
+		{
+			// Retire completed prefixes, but retain their storage until every solver job
+			// returns. A worker that already read this pointer can safely finish its scan.
+			LegacyVelocityBatch *expected = batch;
+			mHead.compare_exchange_strong(expected, batch->mNext, memory_order_acq_rel, memory_order_relaxed);
+		}
+		else if (batch->TryExecute())
+			return true;
+	}
+	return false;
+}
+
+bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inBegin, const uint32 *inEnd, float inDeltaTime)
 {
 	JPH_PROFILE_FUNCTION();
-	// An isolated private Source constraint needs neither an island group table
-	// nor a heap-allocated member list. Keep the exact same local-system solve.
-	if (inConstraintIdxEnd - inConstraintIdxBegin == 1)
+	if (inEnd - inBegin == 1)
 	{
-		Constraint *constraint = inActiveConstraints[*inConstraintIdxBegin];
+		Constraint *constraint = inActiveConstraints[*inBegin];
 		if (LegacyConstraintGroup *group = constraint->GetLegacyConstraintGroup())
 		{
 			constraint->mLegacyPostContactSolveInIsland = constraint->RequiresPostContactLegacySolve();
@@ -352,309 +595,10 @@ bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveCon
 		}
 		return false;
 	}
-
-	struct IslandGroup
-	{
-		LegacyConstraintGroup *mGroup;
-		Constraint *mFirstMember = nullptr;
-		std::vector<Constraint *> mMembers;
-		bool mPostContact = true;
-
-		void AddMember(Constraint *inConstraint)
-		{
-			if (mFirstMember == nullptr)
-				mFirstMember = inConstraint;
-			else
-			{
-				if (mMembers.empty())
-					mMembers.push_back(mFirstMember);
-				mMembers.push_back(inConstraint);
-			}
-		}
-
-		std::span<Constraint *const> GetMembers() const
-		{
-			return mMembers.empty()? std::span<Constraint *const>(&mFirstMember, 1)
-				: std::span<Constraint *const>(mMembers.data(), mMembers.size());
-		}
-
-		bool Solve(float inStepDeltaTime)
-		{
-			const auto members = GetMembers();
-			for (Constraint *c : members)
-				c->mLegacyPostContactSolveInIsland = mPostContact;
-			return mGroup->SolveVelocityConstraints(members.data(), members.size(), inStepDeltaTime);
-		}
-	};
-	std::vector<IslandGroup> groups;
-	UnorderedMap<LegacyConstraintGroup *, size_t> group_indices;
-	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
-	{
-		Constraint *c = inActiveConstraints[*constraint_idx];
-		if (LegacyConstraintGroup *group = c->GetLegacyConstraintGroup())
-		{
-			auto [entry, inserted] = group_indices.try_emplace(group, groups.size());
-			if (inserted)
-				groups.push_back({ group });
-			IslandGroup &batch = groups[entry->second];
-			batch.AddMember(c);
-			batch.mPostContact &= c->RequiresPostContactLegacySolve();
-		}
-	}
-
-	// A contact can join many vehicles into one Jolt island without creating a dependency
-	// between their Havana controller passes. Keep each Source group whole (including its
-	// insertion order, scratch storage and rollback-on-break boundary), and merge groups
-	// that share a writable body. Native constraints and contacts still bracket this pass.
-	// Small islands / direct callers retain the original serial path without scheduling cost.
-	constexpr size_t cMinParallelConstraints = 128;
-	if (inJobSystem != nullptr && inBarrier != nullptr && ioJobBudget != nullptr
-		&& ioJobBudget->load(memory_order_relaxed) != 0 && inJobSystem->GetMaxConcurrency() > 1
-		&& groups.size() > 1 && size_t(inConstraintIdxEnd - inConstraintIdxBegin) >= cMinParallelConstraints)
-	{
-		std::vector<size_t> parents(groups.size());
-		for (size_t i = 0; i < parents.size(); ++i)
-			parents[i] = i;
-		auto root = [&](size_t index)
-		{
-			while (parents[index] != index)
-			{
-				parents[index] = parents[parents[index]];
-				index = parents[index];
-			}
-			return index;
-		};
-		UnorderedMap<const Body *, size_t> body_owners;
-		body_owners.reserve(size_t(inConstraintIdxEnd - inConstraintIdxBegin));
-		bool known_dependencies = true;
-		for (size_t i = 0; i < groups.size() && known_dependencies; ++i)
-			for (Constraint *c : groups[i].GetMembers())
-			{
-				if (c->GetType() != EConstraintType::TwoBodyConstraint)
-				{
-					known_dependencies = false;
-					break;
-				}
-				const auto *two_body = static_cast<const TwoBodyConstraint *>(c);
-				for (const Body *body : { two_body->GetBody1(), two_body->GetBody2() })
-					if (body->IsDynamic())
-					{
-						// Solving and break rollback only write dynamic bodies. Static/world and
-						// kinematic anchors can be shared without coupling these groups.
-						auto [entry, inserted] = body_owners.try_emplace(body, i);
-						if (!inserted)
-						{
-							const size_t a = root(i), b = root(entry->second);
-							parents[max(a, b)] = min(a, b);
-						}
-					}
-			}
-		if (known_dependencies)
-		{
-			std::vector<std::vector<size_t>> components;
-			std::vector<size_t> component_index(groups.size(), SIZE_MAX);
-			for (size_t i = 0; i < groups.size(); ++i)
-			{
-				size_t &index = component_index[root(i)];
-				if (index == SIZE_MAX)
-				{
-					index = components.size();
-					components.emplace_back();
-				}
-				components[index].push_back(i);
-			}
-			if (components.size() > 1)
-			{
-				struct ParallelBatch
-				{
-					std::vector<IslandGroup> mGroups;
-					std::vector<std::vector<size_t>> mComponents;
-					atomic<size_t> mNext { 0 }, mRemaining { 0 };
-					atomic<bool> mAppliedImpulse { false };
-
-					void Execute(float inStepDeltaTime, JobSystem &inJobs)
-					{
-						for (;;)
-						{
-							const size_t index = mNext.fetch_add(1, memory_order_relaxed);
-							if (index >= mComponents.size())
-								return;
-							inJobs.CooperativeYield();
-							bool applied = false;
-							// Preserve both controller phases and first-encounter order for every
-							// pair of groups that can observe each other's velocity writes.
-							for (bool post_contact : { false, true })
-								for (size_t group_index : mComponents[index])
-									if (mGroups[group_index].mPostContact == post_contact)
-										applied |= mGroups[group_index].Solve(inStepDeltaTime);
-							if (applied)
-								mAppliedImpulse.store(true, memory_order_relaxed);
-							// Publish completion only after all body and solver-storage accesses.
-							mRemaining.fetch_sub(1, memory_order_release);
-						}
-					}
-				};
-				auto batch = std::make_shared<ParallelBatch>();
-				batch->mGroups = std::move(groups);
-				batch->mComponents = std::move(components);
-				batch->mRemaining.store(batch->mComponents.size(), memory_order_relaxed);
-				// Avoid one tiny pool job per constraint/group. The owner also drains the
-				// batch, so progress never depends on finding a free worker for a child job.
-				const size_t num_helpers = min(size_t(7), min(size_t(inJobSystem->GetMaxConcurrency() - 1),
-					min(batch->mComponents.size() - 1, size_t(inConstraintIdxEnd - inConstraintIdxBegin) / 64)));
-				for (size_t i = 0; i < num_helpers; ++i)
-				{
-					uint remaining_budget = ioJobBudget->load(memory_order_relaxed);
-					while (remaining_budget != 0 && !ioJobBudget->compare_exchange_weak(
-						remaining_budget, remaining_budget - 1, memory_order_relaxed)) { }
-					if (remaining_budget == 0)
-						break;
-					JobHandle helper = inJobSystem->CreateJob("SolveLegacyConstraintComponents", Color::sYellow,
-						[batch, inDeltaTime, inJobSystem]()
-						{
-						#ifdef JPH_ENABLE_ASSERTS
-							BodyAccess::Grant grant(BodyAccess::EAccess::ReadWrite, BodyAccess::EAccess::Read);
-						#endif
-							batch->Execute(inDeltaTime, *inJobSystem);
-						}, 1);
-					// Reuse Update's barrier, never nest WaitForJobs / enter a second owner
-					// callback scheduler. A late helper owns its batch and only finds no work.
-					inBarrier->AddJob(helper);
-					helper.RemoveDependency();
-				}
-				batch->Execute(inDeltaTime, *inJobSystem);
-				while (batch->mRemaining.load(memory_order_acquire) != 0)
-				{
-					inJobSystem->CooperativeYield();
-					std::this_thread::yield();
-				}
-				return batch->mAppliedImpulse.load(memory_order_relaxed);
-			}
-		}
-	}
-
-	// A connected Gauss-Seidel chain must keep its velocity-write order. Geometry and
-	// effective-mass preparation can share bodies, so batch that read-only work across
-	// all Source groups in this island. Already-parallel independent components above
-	// keep their complete group work and do not pay for a second scheduling layer.
-	struct PreparedEntry
-	{
-		Constraint *mConstraint;
-		void *mStorage;
-	};
-	struct PreparationBatch
-	{
-		std::vector<PreparedEntry> mEntries;
-		atomic<size_t> mNext { 0 }, mRemaining { 0 };
-
-		void Execute(float inStepDeltaTime)
-		{
-		#ifdef JPH_ENABLE_ASSERTS
-			// The caller is already inside an island BodyAccess grant; temporarily narrow
-			// its velocity rights instead of nesting Grant (which is forbidden).
-			const BodyAccess::EAccess old_velocity_access = BodyAccess::sVelocityAccess();
-			BodyAccess::sVelocityAccess() = BodyAccess::EAccess::None;
-		#endif
-			for (;;)
-			{
-				constexpr size_t cBatchSize = 16;
-				const size_t begin = mNext.fetch_add(cBatchSize, memory_order_relaxed);
-				if (begin >= mEntries.size())
-					break;
-				const size_t end = min(begin + cBatchSize, mEntries.size());
-				for (size_t i = begin; i < end; ++i)
-				{
-					const PreparedEntry &entry = mEntries[i];
-					entry.mConstraint->InitializeLegacySolverStorage(entry.mStorage);
-					entry.mConstraint->PrepareLegacyVelocityConstraint(entry.mStorage, inStepDeltaTime);
-					entry.mConstraint->mLegacySolverStoragePrepared = true;
-				}
-				// Publish all writes, including object initialization, before the original
-				// group solve is allowed to borrow these storage ranges.
-				mRemaining.fetch_sub(end - begin, memory_order_release);
-			}
-		#ifdef JPH_ENABLE_ASSERTS
-			BodyAccess::sVelocityAccess() = old_velocity_access;
-		#endif
-		}
-	};
-	struct PreparationScope
-	{
-		std::shared_ptr<PreparationBatch> mBatch;
-		~PreparationScope()
-		{
-			if (mBatch != nullptr)
-				for (const PreparedEntry &entry : mBatch->mEntries)
-				{
-					// Cleanup belongs to this scope, not to the last (possibly late) helper.
-					// It also covers members skipped by rollback-on-break or deactivation.
-					JPH_ASSERT(entry.mConstraint->mLegacySolverStoragePrepared);
-					entry.mConstraint->DestroyLegacySolverStorage(entry.mStorage);
-					entry.mConstraint->mLegacySolverStoragePrepared = false;
-				}
-		}
-	} prepared;
-	constexpr size_t cMinParallelPreparationConstraints = 64;
-	if (inJobSystem != nullptr && inBarrier != nullptr && ioJobBudget != nullptr
-		&& inJobSystem->GetMaxConcurrency() > 1 && ioJobBudget->load(memory_order_relaxed) != 0
-		&& size_t(inConstraintIdxEnd - inConstraintIdxBegin) >= cMinParallelPreparationConstraints)
-	{
-		auto batch = std::make_shared<PreparationBatch>();
-		batch->mEntries.reserve(size_t(inConstraintIdxEnd - inConstraintIdxBegin));
-		for (const IslandGroup &group : groups)
-			for (Constraint *c : group.GetMembers())
-				if (c->IsActive() && c->CanPrepareLegacyVelocityConstraint())
-				{
-					const size_t index = c->mLegacyGroupIndex;
-					JPH_ASSERT(!c->mLegacySolverStoragePrepared);
-					JPH_ASSERT(index < group.mGroup->mConstraints.size() && group.mGroup->mConstraints[index] == c);
-					const size_t offset = group.mGroup->mSolverStorageOffsets[index];
-					if (offset != SIZE_MAX)
-						batch->mEntries.push_back({ c, reinterpret_cast<std::byte *>(group.mGroup->mSolverStorage.data()) + offset });
-				}
-		if (batch->mEntries.size() >= cMinParallelPreparationConstraints)
-		{
-			batch->mRemaining.store(batch->mEntries.size(), memory_order_relaxed);
-			const size_t num_helpers = min(size_t(7), min(size_t(inJobSystem->GetMaxConcurrency() - 1), batch->mEntries.size() / 32 - 1));
-			for (size_t i = 0; i < num_helpers; ++i)
-			{
-				uint remaining_budget = ioJobBudget->load(memory_order_relaxed);
-				while (remaining_budget != 0 && !ioJobBudget->compare_exchange_weak(
-					remaining_budget, remaining_budget - 1, memory_order_relaxed)) { }
-				if (remaining_budget == 0)
-					break;
-				JobHandle helper = inJobSystem->CreateJob("PrepareLegacyConstraintStorage", Color::sYellow,
-					[batch, inDeltaTime]()
-					{
-					#ifdef JPH_ENABLE_ASSERTS
-						BodyAccess::Grant grant(BodyAccess::EAccess::None, BodyAccess::EAccess::Read);
-					#endif
-						batch->Execute(inDeltaTime);
-					}, 1);
-				// Share Update's existing barrier and cumulative helper budget. A late
-				// helper owns its batch and cannot access storage after the caller drains it.
-				inBarrier->AddJob(helper);
-				helper.RemoveDependency();
-			}
-			batch->Execute(inDeltaTime);
-			while (batch->mRemaining.load(memory_order_acquire) != 0)
-			{
-				// All unclaimed work was drained by the caller. Only running, callback-free
-				// preparation can remain; it cannot depend on servicing an owner callback.
-				// Do not add a callback safe point that could invalidate prepared poses.
-				std::this_thread::yield();
-			}
-			prepared.mBatch = std::move(batch);
-		}
-	}
-	// Preserve the existing two controller phases and first-encounter group order. The hash
-	// table is only an index; neither addresses nor hash iteration determine solve order.
-	bool any_impulse_applied = false;
-	for (bool post_contact : { false, true })
-		for (IslandGroup &batch : groups)
-			if (batch.mPostContact == post_contact)
-				any_impulse_applied |= batch.Solve(inDeltaTime);
-	return any_impulse_applied;
+	LegacyVelocityBatch batch;
+	batch.mDeltaTime = inDeltaTime;
+	batch.BuildGroups(inActiveConstraints, inBegin, inEnd);
+	return batch.SolveSerial();
 }
 
 bool ConstraintManager::sSolvePostContactLegacyVelocityMembers(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime)

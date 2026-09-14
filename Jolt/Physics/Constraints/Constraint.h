@@ -230,6 +230,7 @@ public:
 	virtual void				DestroyLegacySolverStorage(void *) const { }
 	/// Opt-in preparation of geometry/effective mass only. This may run concurrently with
 	/// preparation of constraints sharing bodies, but never with their velocity solves.
+	/// This capability must remain unchanged while registered with a ConstraintManager.
 	/// Storage is already initialized. Implementations must not read velocities, change bodies
 	/// or call application callbacks, and SetupAndSolve must consume the prepared work once.
 	virtual bool				CanPrepareLegacyVelocityConstraint() const { return false; }
@@ -326,8 +327,8 @@ private:
 	LegacyConstraintGroup *		mLegacyConstraintGroup = nullptr;
 	size_t						mLegacyGroupIndex = 0;
 	bool						mLegacyPostContactSolveInIsland = false;
-	/// Transient storage borrowed from the current island preparation scope. Cleared before
-	/// its dispatcher returns, including when a group breaks or a member becomes inactive.
+	/// Transient storage prepared by the native setup jobs and borrowed by the island solve.
+	/// Cleared before publishing contact batches, including zero iterations / skipped members.
 	bool						mLegacySolverStoragePrepared = false;
 
 	bool						CheckLegacyBreakAfterSolve(Vec3Arg inLinearVelocity1, Vec3Arg inAngularVelocity1, Vec3Arg inLinearVelocity2, Vec3Arg inAngularVelocity2, bool inRollbackOnBreak);

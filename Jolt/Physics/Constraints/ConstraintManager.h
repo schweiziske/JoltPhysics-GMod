@@ -10,6 +10,9 @@
 #include <Jolt/Core/Mutex.h>
 #include <Jolt/Core/JobSystem.h>
 #include <Jolt/Core/UnorderedMap.h>
+#include <functional>
+#include <memory>
+#include <span>
 
 JPH_NAMESPACE_BEGIN
 
@@ -50,6 +53,8 @@ public:
 
 	/// Get total number of constraints
 	inline uint32			GetNumConstraints() const					{ return uint32(mConstraints.size()); }
+	/// Registered constraints with velocity-independent legacy preparation (including sleeping ones).
+	inline uint32			GetNumLegacyPreparationConstraints() const	{ return mNumLegacyPreparationConstraints; }
 
 	/// Close enabled two-body and legacy-group dynamic wake components before the active
 	/// constraint snapshot. The caller holds all body/constraint locks and grants activation.
@@ -78,7 +83,10 @@ public:
 	static void				sSortConstraints(Constraint **inActiveConstraints, uint32 *inConstraintIdxBegin, uint32 *inConstraintIdxEnd);
 
 	/// Prior to solving the velocity constraints, you must call SetupVelocityConstraints once to precalculate values that are independent of velocity
-	static void				sSetupVelocityConstraints(Constraint **inActiveConstraints, uint32 inNumActiveConstraints, float inDeltaTime);
+	static void				sSetupVelocityConstraints(Constraint **inActiveConstraints, uint32 inNumActiveConstraints, float inDeltaTime, bool inPrepareLegacy = false);
+	/// Release preparation storage for this island before publishing contact batches, even
+	/// when the velocity iteration count is zero or a group stopped early after breaking.
+	static void				sReleasePreparedLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
 
 	/// Apply last frame's impulses, must be called prior to SolveVelocityConstraints
 	template <class ConstraintCallback>
@@ -89,12 +97,85 @@ public:
 
 	static bool				sHasLegacyConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
 
-	/// Execute one Havana controller pass using only members of the current Jolt island.
-	/// The caller owns the once-per-step boundary; no group representative can schedule remote work.
-	/// Optional jobs use the existing Update barrier. A complete group remains indivisible;
-	/// only components that do not share any writable body may execute concurrently. The
-	/// shared per-Update budget bounds cumulative additions to the existing barrier ring.
-	static bool				sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, JobSystem *inJobSystem = nullptr, JobSystem::Barrier *inBarrier = nullptr, atomic<uint> *ioJobBudget = nullptr);
+	/// One island's ordered groups. The scheduler owns this storage until every native
+	/// velocity job returns, including readers that already observed a completed batch.
+	struct LegacyVelocityBatch
+	{
+		struct Group
+		{
+			LegacyConstraintGroup *mGroup;
+			Constraint *mFirstMember = nullptr;
+			std::vector<Constraint *> mMembers;
+			bool mPostContact = true;
+			void AddMember(Constraint *inConstraint);
+			std::span<Constraint *const> GetMembers() const;
+			bool Solve(float inDeltaTime);
+		};
+		std::vector<Group> mGroups;
+		std::vector<uint32> mGroupIndices, mLayerEnds;
+		std::function<void(bool)> mContinuation;
+		LegacyVelocityBatch *mNext = nullptr; // Immutable after publication
+		float mDeltaTime;
+		atomic<uint64> mCursor { 0 }; // High 32 bits: layer; low 32 bits: next group
+		atomic<uint32> mProcessed { 0 };
+		atomic<bool> mAppliedImpulse { false };
+		void BuildGroups(Constraint **inActiveConstraints, const uint32 *inBegin, const uint32 *inEnd);
+		bool BuildLayers(); // False when no parallel width or unknown body dependencies
+		bool SolveSerial();
+		bool TryExecute();
+		bool IsDone() const { return mCursor.load(memory_order_acquire) == UINT64_MAX; }
+	};
+
+	class LegacyVelocityScheduler
+	{
+	public:
+		void Prepare(const IslandBuilder &inBuilder, Constraint **inActiveConstraints, bool inEnabled);
+		void Clear(); // All original velocity jobs must have finished
+		uint32 GetNumIslands() const { return mNumIslands; }
+		bool IsEnabled() const { return mEnabled; }
+		bool HasPendingIslands() const { return mRemainingIslands.load(memory_order_acquire) != 0; }
+		void FinishIsland()
+		{
+			if (mEnabled)
+			{
+				JPH_IF_ENABLE_ASSERTS(uint32 previous =) mRemainingIslands.fetch_sub(1, memory_order_release);
+				JPH_ASSERT(previous > 0);
+			}
+		}
+		void Publish(uint32 inIsland, std::unique_ptr<LegacyVelocityBatch> inBatch);
+		bool TryExecute();
+	private:
+		std::vector<std::unique_ptr<LegacyVelocityBatch>> mBatches;
+		atomic<LegacyVelocityBatch *> mHead { nullptr };
+		atomic<uint32> mRemainingIslands { 0 };
+		uint32 mNumIslands = 0;
+		bool mEnabled = false;
+	};
+
+	/// Direct callers retain a synchronous, ordered controller pass.
+	static bool				sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime);
+	/// Publish ordered layers to the existing native velocity jobs, or invoke the
+	/// continuation synchronously for small/serial islands. Never creates a pool job.
+	template <class Continuation>
+	static void sDispatchLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inBegin, const uint32 *inEnd, float inDeltaTime, LegacyVelocityScheduler &ioScheduler, uint32 inIsland, Continuation inContinuation)
+	{
+		if (!ioScheduler.IsEnabled() || inEnd - inBegin < 128)
+		{
+			inContinuation(sSolveLegacyVelocityConstraints(inActiveConstraints, inBegin, inEnd, inDeltaTime));
+			return;
+		}
+		auto batch = std::make_unique<LegacyVelocityBatch>();
+		batch->mDeltaTime = inDeltaTime;
+		batch->BuildGroups(inActiveConstraints, inBegin, inEnd);
+		if (!batch->BuildLayers())
+		{
+			inContinuation(batch->SolveSerial());
+			return;
+		}
+		// Only asynchronous islands need an owning callback allocation.
+		batch->mContinuation = std::move(inContinuation);
+		ioScheduler.Publish(inIsland, std::move(batch));
+	}
 
 	/// Refresh predictive micro-angle members after contacts. This removes contact-generated angular
 	/// velocity without moving an otherwise mixed Weld/Rope group to the post-contact controller stage.
@@ -129,6 +210,7 @@ public:
 	void					UnlockAllConstraints()						{ PhysicsLock::sUnlock(mConstraintsMutex JPH_IF_ENABLE_ASSERTS(, mLockContext, EPhysicsLockTypes::ConstraintsList)); }
 
 private:
+	uint32					mNumLegacyPreparationConstraints = 0;
 	struct WakeNode
 	{
 		BodyID				mBodyID;

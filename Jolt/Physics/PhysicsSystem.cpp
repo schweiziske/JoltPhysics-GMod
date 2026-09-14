@@ -299,7 +299,13 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 	int num_determine_active_constraints_jobs = max(1, min(((int)mConstraintManager.GetNumConstraints() + cDetermineActiveConstraintsBatchSize - 1) / cDetermineActiveConstraintsBatchSize, max_concurrency - 2));
 
 	// Number of setup velocity constraints jobs to run depends on number of constraints.
-	int num_setup_velocity_constraints_jobs = max(1, min(((int)mConstraintManager.GetNumConstraints() + cSetupVelocityConstraintsBatchSize - 1) / cSetupVelocityConstraintsBatchSize, max_concurrency));
+	// Keep the native grain for ordinary/small scenes. Fixed geometry is heavier and must
+	// not be claimed as one 256-item batch by a single worker. Count capability at registration
+	// rather than rescanning the world here; only the active snapshot is actually prepared.
+	context.mPrepareLegacyConstraints = max_concurrency > 1 && mConstraintManager.GetNumLegacyPreparationConstraints() >= 64;
+	context.mSetupVelocityConstraintsBatchSize = context.mPrepareLegacyConstraints? 32 : cSetupVelocityConstraintsBatchSize;
+	const uint32 setup_batch_size = context.mSetupVelocityConstraintsBatchSize;
+	int num_setup_velocity_constraints_jobs = max(1, min(int((mConstraintManager.GetNumConstraints() + setup_batch_size - 1) / setup_batch_size), max_concurrency));
 
 	// Number of find collisions jobs to run depends on number of active bodies.
 	// Note that when we have more than 1 thread, we always spawn at least 2 find collisions jobs so that the first job can wait for build islands from constraints
@@ -892,15 +898,17 @@ void PhysicsSystem::JobSetupVelocityConstraints(float inDeltaTime, PhysicsUpdate
 #endif
 
 	uint32 num_constraints = ioStep->mNumActiveConstraints;
+	const uint32 batch_size = ioStep->mContext->mSetupVelocityConstraintsBatchSize;
 
 	for (;;)
 	{
 		// Atomically fetch a batch of constraints
-		uint32 constraint_idx = ioStep->mSetupVelocityConstraintsReadIdx.fetch_add(cSetupVelocityConstraintsBatchSize);
+		uint32 constraint_idx = ioStep->mSetupVelocityConstraintsReadIdx.fetch_add(batch_size);
 		if (constraint_idx >= num_constraints)
 			break;
 
-		ConstraintManager::sSetupVelocityConstraints(ioStep->mContext->mActiveConstraints + constraint_idx, min<uint32>(cSetupVelocityConstraintsBatchSize, num_constraints - constraint_idx), inDeltaTime);
+		ConstraintManager::sSetupVelocityConstraints(ioStep->mContext->mActiveConstraints + constraint_idx,
+			min<uint32>(batch_size, num_constraints - constraint_idx), inDeltaTime, ioStep->mContext->mPrepareLegacyConstraints);
 	}
 }
 
@@ -1456,6 +1464,8 @@ void PhysicsSystem::JobFinalizeIslands(PhysicsUpdateContext *ioContext)
 		mDebugIslands.resize(mIslandBuilder.GetNumIslands());
 	}
 
+	ioContext->mLegacyVelocityScheduler.Prepare(mIslandBuilder, ioContext->mActiveConstraints, ioContext->GetMaxConcurrency() > 1);
+
 	// Prepare the large island splitter
 	if (mPhysicsSettings.mUseLargeIslandSplitter)
 		mLargeIslandSplitter.Prepare(mIslandBuilder, mContactManager, ioContext->mActiveConstraints,
@@ -1498,6 +1508,9 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 	bool check_islands = true, check_split_islands = mPhysicsSettings.mUseLargeIslandSplitter;
 	for (;;)
 	{
+		if (ioContext->mLegacyVelocityScheduler.TryExecute())
+			continue;
+
 		// First try to get work from large islands
 		if (check_split_islands)
 		{
@@ -1581,7 +1594,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 		{
 			// Next island
 			uint32 island_idx = ioStep->mSolveVelocityConstraintsNextIsland++;
-			if (island_idx >= mIslandBuilder.GetNumIslands())
+			if (island_idx >= ioContext->mLegacyVelocityScheduler.GetNumIslands())
 			{
 				// We processed all islands, stop checking islands
 				check_islands = false;
@@ -1595,22 +1608,8 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 			bool has_constraints = mIslandBuilder.GetConstraintsInIsland(island_idx, constraints_begin, constraints_end);
 			bool has_contacts = mIslandBuilder.GetContactsInIsland(island_idx, contacts_begin, contacts_end);
 
-			// If we don't have any contacts or constraints, we know that none of the following islands have any contacts or constraints
-			// (because they're sorted by most constraints first). This means we're done.
-			if (!has_contacts && !has_constraints)
-			{
-			#ifdef JPH_ENABLE_ASSERTS
-				// Validate our assumption that the next islands don't have any constraints or contacts
-				for (; island_idx < mIslandBuilder.GetNumIslands(); ++island_idx)
-				{
-					JPH_ASSERT(!mIslandBuilder.GetConstraintsInIsland(island_idx, constraints_begin, constraints_end));
-					JPH_ASSERT(!mIslandBuilder.GetContactsInIsland(island_idx, contacts_begin, contacts_end));
-				}
-			#endif // JPH_ENABLE_ASSERTS
-
-				check_islands = false;
-				continue;
-			}
+			// Finalize counted this nonempty prefix before any worker could publish work.
+			JPH_ASSERT(has_contacts || has_constraints);
 
 		#ifdef JPH_TRACK_SIMULATION_STATS
 			uint64 start_tick = GetProcessorTickCount();
@@ -1674,6 +1673,25 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					steps_calculator.SetMinimumPositionSteps(4);
 				}
 			}
+			auto record_island = [=, this](bool inLargeIsland, const CalculateSolverSteps &inSteps)
+			{
+				if (mIslandDebugEnabled)
+				{
+					// A published split's final worker owns its final velocity count.
+					if (!inLargeIsland)
+						mDebugIslands[island_idx].mVelocitySteps = inSteps.GetNumVelocitySteps();
+					mDebugIslands[island_idx].mPositionSteps = inSteps.GetNumPositionSteps();
+				}
+			#ifdef JPH_TRACK_SIMULATION_STATS
+				uint64 num_ticks = GetProcessorTickCount() - start_tick;
+				IslandBuilder::IslandStats &stats = mIslandBuilder.GetIslandStats(island_idx);
+				if (!inLargeIsland)
+					stats.mNumVelocitySteps = inSteps.GetNumVelocitySteps();
+				stats.mNumPositionSteps = (uint8)inSteps.GetNumPositionSteps();
+				stats.mVelocityConstraintTicks.fetch_add(num_ticks, memory_order_relaxed);
+				stats.mIsLargeIsland = inLargeIsland;
+			#endif
+			};
 			if (!mPhysicsSettings.mUseLargeIslandSplitter
 				|| has_vphysics_contacts
 				|| has_legacy_friction
@@ -1703,7 +1721,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				const uint num_velocity_steps = steps_calculator.GetNumVelocitySteps();
 				const bool trace_legacy_stages = has_legacy_constraints
 					&& IsLegacyStageTraceEnabled();
-				auto trace_legacy_bodies = [&](const char *inStage)
+				auto trace_legacy_bodies = [=, this](const char *inStage)
 				{
 					if (!trace_legacy_stages)
 						return;
@@ -1730,97 +1748,101 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 							v2.GetX(), v2.GetY(), v2.GetZ(), w2.GetX(), w2.GetY(), w2.GetZ());
 					}
 				};
-				uint remaining_velocity_steps = 0;
-				for (uint velocity_step = 0; velocity_step < num_velocity_steps; ++velocity_step)
+				auto finish_velocity = [=, this](bool legacy_applied, bool first_applied) mutable
 				{
-					bool applied_impulse = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
-					if (velocity_step == 0)
+					bool is_large_island = false;
+					if (has_legacy_constraints && num_velocity_steps > 0)
+						trace_legacy_bodies("after_havana");
+					uint remaining_velocity_steps = 0;
+					for (uint velocity_step = 0; velocity_step < num_velocity_steps; ++velocity_step)
+					{
+						bool applied_impulse = velocity_step == 0? first_applied | legacy_applied
+							: ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
+						if (has_vphysics_contacts)
+						{
+							if (velocity_step == 0)
+							{
+								applied_impulse |= mContactManager.SolveVPhysicsImpactConstraints(contacts_begin, contacts_end, delta_time);
+								trace_legacy_bodies("after_contact_impact");
+								applied_impulse |= mContactManager.SolvePersistentNonPenetrationConstraints(contacts_begin, contacts_end);
+								trace_legacy_bodies("after_normal");
+							}
+						}
+						// Native contacts retain their ordinary iterative solve even in a mixed
+						// island. The manager excludes contacts owned by the legacy phases.
+						applied_impulse |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
+						if (split_after_legacy)
+						{
+							// The first iteration, including every ordered compatibility phase, is
+							// complete. Publish only the remaining native iterations to Jolt workers.
+							remaining_velocity_steps = applied_impulse? num_velocity_steps - 1 : 0;
+							break;
+						}
+						if (!applied_impulse)
+							break;
+					}
+					// Setup owns construction, this island owns cleanup. Do not put this inside
+					// the Havana call: zero velocity iterations never enter that call, and broken
+					// groups may skip prepared members. Complete cleanup before exposing batches.
+					if (has_legacy_constraints && ioContext->mPrepareLegacyConstraints)
+						ConstraintManager::sReleasePreparedLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end);
+					if (!split_after_legacy || remaining_velocity_steps == 0)
 					{
 						if (has_legacy_friction || has_vphysics_contacts)
-						{
-							trace_legacy_bodies("pre");
-							// IVP evaluates each contact controller independently. A fresh impact on one
-							// wheel must not disable the already-established distance keepers on the other
-							// wheels in the same constraint island.
-							mContactManager.ResetImpactingLegacyFrictionState(contacts_begin, contacts_end);
-							applied_impulse |= mContactManager.SolveLegacyFrictionConstraints(contacts_begin, contacts_end, delta_time);
-							trace_legacy_bodies("after_friction");
-						}
-						if (has_legacy_constraints)
-						{
-							applied_impulse |= ConstraintManager::sSolveLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time,
-								ioContext->mJobSystem, ioContext->mBarrier, &ioContext->mLegacyConstraintJobBudget);
-							trace_legacy_bodies("after_havana");
-						}
+							mContactManager.IntegrateLegacyFrictionState(contacts_begin, contacts_end, delta_time);
+
+						// A zero-iteration split has no final worker, so finalize before publishing it.
+						mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
 					}
-					if (has_vphysics_contacts)
-					{
-						if (velocity_step == 0)
-						{
-							applied_impulse |= mContactManager.SolveVPhysicsImpactConstraints(contacts_begin, contacts_end, delta_time);
-							trace_legacy_bodies("after_contact_impact");
-							applied_impulse |= mContactManager.SolvePersistentNonPenetrationConstraints(contacts_begin, contacts_end);
-							trace_legacy_bodies("after_normal");
-						}
-					}
-					// Native contacts retain their ordinary iterative solve even in a mixed
-					// island. The manager excludes contacts owned by the legacy phases.
-					applied_impulse |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
 					if (split_after_legacy)
 					{
-						// The first iteration, including every ordered compatibility phase, is
-						// complete. Publish only the remaining native iterations to Jolt workers.
-						remaining_velocity_steps = applied_impulse? num_velocity_steps - 1 : 0;
-						break;
+						if (mIslandDebugEnabled)
+						{
+							mDebugIslands[island_idx].mMode = DebugIslandMode::SplitVelocity;
+							mDebugIslands[island_idx].mVelocitySteps = num_velocity_steps;
+						}
+					#ifdef JPH_TRACK_SIMULATION_STATS
+						mIslandBuilder.GetIslandStats(island_idx).mNumVelocitySteps = num_velocity_steps;
+					#endif
+						// Prepare reserved this slot even when the first iteration converged. Publish
+						// an empty velocity schedule in that case so other workers can finish.
+						is_large_island = mLargeIslandSplitter.SplitIsland(island_idx, mIslandBuilder, mBodyManager,
+							mContactManager, active_constraints, steps_calculator, true, remaining_velocity_steps);
+						JPH_ASSERT(is_large_island);
 					}
-					if (!applied_impulse)
-						break;
-				}
-				if (!split_after_legacy || remaining_velocity_steps == 0)
+					record_island(is_large_island, steps_calculator);
+					ioContext->mLegacyVelocityScheduler.FinishIsland();
+				};
+				bool first_applied = false;
+				if (num_velocity_steps > 0)
 				{
+					first_applied = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
 					if (has_legacy_friction || has_vphysics_contacts)
-						mContactManager.IntegrateLegacyFrictionState(contacts_begin, contacts_end, delta_time);
-
-					// A zero-iteration split has no final worker, so finalize before publishing it.
-					mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
-				}
-				if (split_after_legacy)
-				{
-					if (mIslandDebugEnabled)
 					{
-						mDebugIslands[island_idx].mMode = DebugIslandMode::SplitVelocity;
-						mDebugIslands[island_idx].mVelocitySteps = num_velocity_steps;
+						trace_legacy_bodies("pre");
+						// IVP evaluates each contact controller independently. A fresh impact on one
+						// wheel must not disable the already-established distance keepers on the other
+						// wheels in the same constraint island.
+						mContactManager.ResetImpactingLegacyFrictionState(contacts_begin, contacts_end);
+						first_applied |= mContactManager.SolveLegacyFrictionConstraints(contacts_begin, contacts_end, delta_time);
+						trace_legacy_bodies("after_friction");
 					}
-				#ifdef JPH_TRACK_SIMULATION_STATS
-					mIslandBuilder.GetIslandStats(island_idx).mNumVelocitySteps = num_velocity_steps;
-				#endif
-					// Prepare reserved this slot even when the first iteration converged. Publish
-					// an empty velocity schedule in that case so other workers can finish.
-					is_large_island = mLargeIslandSplitter.SplitIsland(island_idx, mIslandBuilder, mBodyManager,
-						mContactManager, active_constraints, steps_calculator, true, remaining_velocity_steps);
-					JPH_ASSERT(is_large_island);
 				}
+				if (has_legacy_constraints && num_velocity_steps > 0)
+					ConstraintManager::sDispatchLegacyVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time,
+						ioContext->mLegacyVelocityScheduler, island_idx,
+						[finish_velocity, first_applied](bool inApplied) mutable { finish_velocity(inApplied, first_applied); });
+				else
+					finish_velocity(false, first_applied);
 			}
 
-			if (mIslandDebugEnabled)
+			if (is_large_island)
 			{
-				// A split island's final worker owns its final velocity count. It may
-				// already have finished, so the publishing worker must not overwrite it.
-				if (!is_large_island)
-					mDebugIslands[island_idx].mVelocitySteps = steps_calculator.GetNumVelocitySteps();
-				mDebugIslands[island_idx].mPositionSteps = steps_calculator.GetNumPositionSteps();
+				record_island(true, steps_calculator);
+				ioContext->mLegacyVelocityScheduler.FinishIsland();
 			}
-		#ifdef JPH_TRACK_SIMULATION_STATS
-			uint64 num_ticks = GetProcessorTickCount() - start_tick;
-			IslandBuilder::IslandStats &stats = mIslandBuilder.GetIslandStats(island_idx);
-			if (!is_large_island)
-				stats.mNumVelocitySteps = steps_calculator.GetNumVelocitySteps();
-			stats.mNumPositionSteps = (uint8)steps_calculator.GetNumPositionSteps();
-			stats.mVelocityConstraintTicks.fetch_add(num_ticks, memory_order_relaxed);
-			stats.mIsLargeIsland = is_large_island;
-		#endif
 		}
-		else if (check_split_islands)
+		else if (check_split_islands || ioContext->mLegacyVelocityScheduler.HasPendingIslands())
 		{
 			// If there are split islands, but we didn't do any work, give up a time slice
 			ioContext->mJobSystem->CooperativeYield();
@@ -1838,6 +1860,9 @@ JPH_SUPPRESS_WARNING_POP
 
 void PhysicsSystem::JobPreIntegrateVelocity(PhysicsUpdateContext *ioContext, PhysicsUpdateContext::Step *ioStep)
 {
+	// Every original solver job has returned, including readers of completed Havana batches.
+	ioContext->mLegacyVelocityScheduler.Clear();
+
 	// Reserve enough space for all bodies that may need a cast
 	TempAllocator *temp_allocator = ioContext->mTempAllocator;
 	JPH_ASSERT(ioStep->mCCDBodies == nullptr);
