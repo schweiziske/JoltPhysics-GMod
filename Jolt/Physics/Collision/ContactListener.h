@@ -160,6 +160,12 @@ public:
 	/// topology, transforms and mass properties must wait until Update completes.
 	virtual bool			OnContactResponse([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, [[maybe_unused]] const ContactManifold &inManifold, [[maybe_unused]] uint inPoint, const std::function<bool()> &inResponse) { return inResponse(); }
 
+	/// Optional synchronous dispatch of an existing contact solver range. The range
+	/// is executed exactly once, in its original order, and must complete before
+	/// returning. This does not batch Pre calls separately from their responses/Post.
+	virtual bool			WantsContactResponseBatches() const { return false; }
+	virtual bool			OnContactResponseBatch([[maybe_unused]] const Body &inBody, const std::function<bool()> &inBatch) { return inBatch(); }
+
 	/// A swept response uses contact points at its hit time while the integrator
 	/// still retains the start transforms. Supply the COMs used by the actual
 	/// response so listeners don't mistake omega x translation for impact speed.

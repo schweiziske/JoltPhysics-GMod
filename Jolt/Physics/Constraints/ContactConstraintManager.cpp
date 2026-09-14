@@ -2258,7 +2258,7 @@ bool ContactConstraintManager::sSolveVelocityConstraint(ContactConstraintBase &i
 }
 
 template <EMotionType Type1, EMotionType Type2>
-bool ContactConstraintManager::sDispatchContactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, const std::function<bool()> &inResponse, bool inLegacyImpact)
+bool ContactConstraintManager::sDispatchContactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, const std::function<bool()> &inResponse, bool inLegacyImpact, const std::function<bool()> *inBatchTail)
 {
 	auto &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
 	if (!constraint.mTrackContactResponse || constraint.mResponseEstablished || constraint.mSevereInterpenetration)
@@ -2358,12 +2358,22 @@ bool ContactConstraintManager::sDispatchContactResponse(ContactConstraintManager
 		}
 		return inResponse();
 	};
-	return inManager.mContactListener != nullptr
-		? inManager.mContactListener->OnContactResponse(body1, body2, manifold, response_point, response) : response();
+	const auto dispatch = [&]() {
+		return inManager.mContactListener != nullptr
+			? inManager.mContactListener->OnContactResponse(body1, body2, manifold, response_point, response) : response();
+	};
+	if (inBatchTail != nullptr)
+		return inManager.mContactListener->OnContactResponseBatch(body1, [&]() {
+			// A real response has now been selected. Finish its original transaction
+			// and then the untouched remainder of this solver range on the owner.
+			const bool applied = dispatch();
+			return (*inBatchTail)() | applied;
+		});
+	return dispatch();
 }
 
 template <EMotionType Type1, EMotionType Type2, bool SolveFriction, bool SolveNonPenetration>
-bool ContactConstraintManager::sSolveContactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, MotionProperties *ioMP1, MotionProperties *ioMP2)
+bool ContactConstraintManager::sSolveContactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, MotionProperties *ioMP1, MotionProperties *ioMP2, const std::function<bool()> *inBatchTail)
 {
 	// Most iterations service an established contact, not a new game callback.
 	// Bypass type-erased callback construction/invocation for that hot path;
@@ -2373,7 +2383,7 @@ bool ContactConstraintManager::sSolveContactResponse(ContactConstraintManager &i
 	if (!ioConstraint.mTrackContactResponse || ioConstraint.mResponseEstablished || ioConstraint.mSevereInterpenetration)
 		return sSolveVelocityConstraint<Type1, Type2, SolveFriction, SolveNonPenetration>(ioConstraint, ioMP1, ioMP2);
 	const auto solve = [&]() { return sSolveVelocityConstraint<Type1, Type2, SolveFriction, SolveNonPenetration>(ioConstraint, ioMP1, ioMP2); };
-	return sDispatchContactResponse<Type1, Type2>(inManager, ioConstraint, solve, false);
+	return sDispatchContactResponse<Type1, Type2>(inManager, ioConstraint, solve, false, inBatchTail);
 }
 
 template <EMotionType Type1, EMotionType Type2>
@@ -3134,14 +3144,18 @@ void ContactConstraintManager::sIntegrateLegacyFrictionState(ContactConstraintBa
 	for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
 	{
 		WorldContactPoint<Type1, Type2> &wcp = constraint.mContactPoints[i];
+		// Zero-friction rows are only Deactivate()d by native setup: their
+		// Jacobians and bias are uninitialized. Follow Jolt's active-row contract.
+		if (!wcp.mFrictionConstraint1.IsActive() && !wcp.mFrictionConstraint2.IsActive())
+			continue;
 		Vec3 displacement = Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mVPhysicsFrictionDisplacement);
 		displacement -= ws_normal * displacement.Dot(ws_normal);
-		const float relative_velocity1 = wcp.mFrictionConstraint1.GetVelocityConstraintValue(
+		const float relative_velocity1 = wcp.mFrictionConstraint1.IsActive()? wcp.mFrictionConstraint1.GetVelocityConstraintValue(
 			linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, t1)
-			- wcp.mFrictionConstraint1.GetVelocityBias();
-		const float relative_velocity2 = wcp.mFrictionConstraint2.GetVelocityConstraintValue(
+			- wcp.mFrictionConstraint1.GetVelocityBias() : 0.0f;
+		const float relative_velocity2 = wcp.mFrictionConstraint2.IsActive()? wcp.mFrictionConstraint2.GetVelocityConstraintValue(
 			linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, t2)
-			- wcp.mFrictionConstraint2.GetVelocityBias();
+			- wcp.mFrictionConstraint2.GetVelocityBias() : 0.0f;
 		displacement += (t1 * relative_velocity1 + t2 * relative_velocity2) * inDeltaTime;
 		if (VelocityDiagnostics::Enabled())
 			VelocityDiagnostics::Check("friction-integrate", i, *constraint.mBody1, *constraint.mBody2,
@@ -3151,12 +3165,12 @@ void ContactConstraintManager::sIntegrateLegacyFrictionState(ContactConstraintBa
 }
 
 template <bool SolveFriction, bool SolveNonPenetration, bool PersistentOnly>
-bool ContactConstraintManager::TemplatedSolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd)
+bool ContactConstraintManager::TemplatedSolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, bool inAllowBatch)
 {
 	JPH_PROFILE_FUNCTION();
 
 	// Build dispatch table
-	using DispatchFunc = bool (*)(ContactConstraintManager &, ContactConstraintBase &, MotionProperties *, MotionProperties *);
+	using DispatchFunc = bool (*)(ContactConstraintManager &, ContactConstraintBase &, MotionProperties *, MotionProperties *, const std::function<bool()> *);
 	static const DispatchFunc table[3][3] = {
 		{
 			nullptr, // Static vs static doesn't exist
@@ -3181,7 +3195,15 @@ bool ContactConstraintManager::TemplatedSolveVelocityConstraints(const uint32 *i
 	bool any_impulse_applied = false;
 
 	ContactConstraintBase *next_constraint = reinterpret_cast<ContactConstraintBase *>(mConstraints + *inConstraintOffsetBegin);
-	for (const uint32 *next_constraint_offset = inConstraintOffsetBegin + 1; next_constraint != nullptr; ++next_constraint_offset)
+	const uint32 *next_constraint_offset = inConstraintOffsetBegin + 1;
+	bool batch_executed = false;
+	std::function<bool()> batch_tail;
+	if (SolveNonPenetration && inAllowBatch && mContactListener != nullptr && mContactListener->WantsContactResponseBatches())
+		batch_tail = [&]() {
+			batch_executed = true;
+			return TemplatedSolveVelocityConstraints<SolveFriction, SolveNonPenetration, PersistentOnly>(next_constraint_offset, inConstraintOffsetEnd, false);
+		};
+	for (; next_constraint != nullptr; ++next_constraint_offset)
 	{
 		ContactConstraintBase &constraint = *next_constraint;
 		if (next_constraint_offset < inConstraintOffsetEnd)
@@ -3201,8 +3223,10 @@ bool ContactConstraintManager::TemplatedSolveVelocityConstraints(const uint32 *i
 		Body &body1 = *constraint.mBody1;
 		Body &body2 = *constraint.mBody2;
 		any_impulse_applied |= VelocityDiagnostics::Observe(PersistentOnly? "legacy-normal" : "native-contact", 0, body1, body2, [&]() {
-			return table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](*this, constraint, body1.GetMotionPropertiesUnchecked(), body2.GetMotionPropertiesUnchecked());
+			return table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](*this, constraint, body1.GetMotionPropertiesUnchecked(), body2.GetMotionPropertiesUnchecked(), batch_tail ? &batch_tail : nullptr);
 		});
+		if (batch_executed)
+			break;
 	}
 
 	return any_impulse_applied;

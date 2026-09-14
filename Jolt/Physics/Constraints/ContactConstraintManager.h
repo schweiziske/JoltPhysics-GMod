@@ -615,10 +615,10 @@ private:
 	static bool					sSolveVelocityConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2);
 
 	template <EMotionType Type1, EMotionType Type2, bool SolveFriction, bool SolveNonPenetration>
-	static bool					sSolveContactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2);
+	static bool					sSolveContactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, const std::function<bool()> *inBatchTail);
 
 	template <EMotionType Type1, EMotionType Type2>
-	static bool					sDispatchContactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, const std::function<bool()> &inResponse, bool inLegacyImpact);
+	static bool					sDispatchContactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, const std::function<bool()> &inResponse, bool inLegacyImpact, const std::function<bool()> *inBatchTail = nullptr);
 
 	template <EMotionType Type1, EMotionType Type2>
 	static bool					sSolveVPhysicsImpactConstraint(ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget, float inInterpenetrationRescueSpeed, uint32 &ioRemainingSystemImpacts, VPhysicsSolverStats &ioStats);
@@ -627,7 +627,7 @@ private:
 	static bool					sSolveVPhysicsImpactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, MotionProperties *ioMotionProperties1, MotionProperties *ioMotionProperties2, float inDeltaTime, float inContactSeparationTarget, float inInterpenetrationRescueSpeed, uint32 &ioRemainingSystemImpacts, VPhysicsSolverStats &ioStats);
 
 	template <bool SolveFriction, bool SolveNonPenetration, bool PersistentOnly>
-	bool						TemplatedSolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd);
+	bool						TemplatedSolveVelocityConstraints(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd, bool inAllowBatch = true);
 
 
 	template <EMotionType Type1, EMotionType Type2>
