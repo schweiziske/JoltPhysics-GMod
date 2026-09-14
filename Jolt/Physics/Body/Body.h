@@ -120,6 +120,9 @@ public:
 	/// Set the motion type of this body. Consider using BodyInterface::SetMotionType instead of this function if the body may be active or if it needs to be activated.
 	void					SetMotionType(EMotionType inMotionType);
 
+	/// Invalidates cached dynamic connectivity, including direct low-level motion changes.
+	static uint64			GetMotionTypeChangeSequence();
+
 	/// Get broadphase layer, this determines in which broad phase sub-tree the object is placed
 	inline BroadPhaseLayer	GetBroadPhaseLayer() const										{ return mBroadPhaseLayer; }
 

@@ -2158,9 +2158,11 @@ bool ContactConstraintManager::sSolveVelocityConstraint(ContactConstraintBase &i
 
 	bool any_impulse_applied = false;
 
-	// Calculate tangents
+	// Native tangents are unused by normal-only passes and Havana friction.
 	Vec3 t1, t2;
-	constraint.GetTangents(t1, t2);
+	if constexpr (SolveFriction)
+		if (!constraint.mUseLegacyFriction && !constraint.mUseVPhysicsSolver)
+			constraint.GetTangents(t1, t2);
 
 	// Get velocities
 	Vec3 linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2;
@@ -2263,12 +2265,6 @@ bool ContactConstraintManager::sDispatchContactResponse(ContactConstraintManager
 	const RMat44 transform1 = body1.GetCenterOfMassTransform(), transform2 = body2.GetCenterOfMassTransform();
 	const Vec3 normal = constraint.GetWorldSpaceNormal();
 	const float delta_time = inManager.mUpdateContext->mStepDeltaTime;
-	ContactManifold manifold;
-	manifold.mBaseOffset = transform1.GetTranslation();
-	manifold.mWorldSpaceNormal = normal;
-	manifold.mSubShapeID1 = constraint.mSubShapePair.GetSubShapeID1();
-	manifold.mSubShapeID2 = constraint.mSubShapePair.GetSubShapeID2();
-	manifold.mPenetrationDepth = -FLT_MAX;
 	const Vec3 v1 = body1.GetLinearVelocity(), w1 = body1.GetAngularVelocity();
 	const Vec3 v2 = body2.GetLinearVelocity(), w2 = body2.GetAngularVelocity();
 	float max_closing = 0.0f;
@@ -2276,21 +2272,21 @@ bool ContactConstraintManager::sDispatchContactResponse(ContactConstraintManager
 	for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
 	{
 		const auto &wcp = constraint.mContactPoints[i];
+		// Reject unloaded native points using the already prepared normal row.
+		// No world-point reconstruction or callback manifold is needed for them.
+		if (!inLegacyImpact && !(wcp.mNonPenetrationConstraint.SolveVelocityConstraintGetTotalLambda(v1, w1, v2, w2, normal)
+			> max(0.0f, wcp.mNonPenetrationConstraint.GetTotalLambda())))
+			continue;
 		const RVec3 p1 = transform1 * Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mPosition1);
 		const RVec3 p2 = transform2 * Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mPosition2);
-		manifold.mRelativeContactPointsOn1.push_back(Vec3(p1 - manifold.mBaseOffset));
-		manifold.mRelativeContactPointsOn2.push_back(Vec3(p2 - manifold.mBaseOffset));
-		const float gap = Vec3(p2 - p1).Dot(normal);
-		manifold.mPenetrationDepth = max(manifold.mPenetrationDepth, -gap);
 		const RVec3 p = 0.5_r * (p1 + p2);
 		const float closing = -(body2.GetPointVelocity(p) - body1.GetPointVelocity(p)).Dot(normal);
 		// A fast but unloaded point must not borrow another point's impulse. Nor
 		// may a nearby speculative pair borrow a body's collision with the floor.
 		const bool will_respond = inLegacyImpact
-			? closing > 1.0e-4f && gap - closing * delta_time <= 0.5f * inManager.mPhysicsSettings.mContactSeparationTarget
+			? closing > 1.0e-4f && Vec3(p2 - p1).Dot(normal) - closing * delta_time <= 0.5f * inManager.mPhysicsSettings.mContactSeparationTarget
 				&& constraint.mInvMass1 + constraint.mInvMass2 > 0.0f
-			: wcp.mNonPenetrationConstraint.SolveVelocityConstraintGetTotalLambda(v1, w1, v2, w2, normal)
-				> max(0.0f, wcp.mNonPenetrationConstraint.GetTotalLambda());
+			: true;
 		if (will_respond && closing > max_closing)
 		{
 			max_closing = closing;
@@ -2300,6 +2296,23 @@ bool ContactConstraintManager::sDispatchContactResponse(ContactConstraintManager
 	if (max_closing <= 0.0f)
 		return inResponse();
 
+	// A real Pre/response/Post transaction needs every original manifold point,
+	// including unloaded points, in the original order. Build it only now.
+	ContactManifold manifold;
+	manifold.mBaseOffset = transform1.GetTranslation();
+	manifold.mWorldSpaceNormal = normal;
+	manifold.mSubShapeID1 = constraint.mSubShapePair.GetSubShapeID1();
+	manifold.mSubShapeID2 = constraint.mSubShapePair.GetSubShapeID2();
+	manifold.mPenetrationDepth = -FLT_MAX;
+	for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
+	{
+		const auto &wcp = constraint.mContactPoints[i];
+		const RVec3 p1 = transform1 * Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mPosition1);
+		const RVec3 p2 = transform2 * Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mPosition2);
+		manifold.mRelativeContactPointsOn1.push_back(Vec3(p1 - manifold.mBaseOffset));
+		manifold.mRelativeContactPointsOn2.push_back(Vec3(p2 - manifold.mBaseOffset));
+		manifold.mPenetrationDepth = max(manifold.mPenetrationDepth, -Vec3(p2 - p1).Dot(normal));
+	}
 	constraint.mResponseEstablished = true;
 	constraint.mImpactResponseThisStep = true;
 	const auto response = [&]()
@@ -2349,8 +2362,14 @@ bool ContactConstraintManager::sDispatchContactResponse(ContactConstraintManager
 template <EMotionType Type1, EMotionType Type2, bool SolveFriction, bool SolveNonPenetration>
 bool ContactConstraintManager::sSolveContactResponse(ContactConstraintManager &inManager, ContactConstraintBase &ioConstraint, MotionProperties *ioMP1, MotionProperties *ioMP2)
 {
+	// Most iterations service an established contact, not a new game callback.
+	// Bypass type-erased callback construction/invocation for that hot path;
+	// the normal/friction solve and its order are unchanged.
+	if constexpr (!SolveNonPenetration)
+		return sSolveVelocityConstraint<Type1, Type2, SolveFriction, SolveNonPenetration>(ioConstraint, ioMP1, ioMP2);
+	if (!ioConstraint.mTrackContactResponse || ioConstraint.mResponseEstablished || ioConstraint.mSevereInterpenetration)
+		return sSolveVelocityConstraint<Type1, Type2, SolveFriction, SolveNonPenetration>(ioConstraint, ioMP1, ioMP2);
 	const auto solve = [&]() { return sSolveVelocityConstraint<Type1, Type2, SolveFriction, SolveNonPenetration>(ioConstraint, ioMP1, ioMP2); };
-	if constexpr (!SolveNonPenetration) return solve();
 	return sDispatchContactResponse<Type1, Type2>(inManager, ioConstraint, solve, false);
 }
 

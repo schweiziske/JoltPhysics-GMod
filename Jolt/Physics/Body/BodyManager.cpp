@@ -448,6 +448,8 @@ void BodyManager::AddBodyToActiveBodies(Body &ioBody)
 	JPH_ASSERT(num_active_bodies_val < GetMaxBodies());
 	active_bodies[num_active_bodies_val] = ioBody.GetID();
 	num_active_bodies.fetch_add(1, memory_order_release); // Increment atomic after setting the body ID so that PhysicsSystem::JobFindCollisions (which doesn't lock the mActiveBodiesMutex) will only read valid IDs
+	if (ioBody.IsRigidBody())
+		mActiveBodiesRevision.fetch_add(1, memory_order_release);
 
 	// Count CCD bodies
 	if (mp->GetMotionQuality() == EMotionQuality::LinearCast)
@@ -480,6 +482,8 @@ void BodyManager::RemoveBodyFromActiveBodies(Body &ioBody)
 
 	// Remove unused element from active bodies list
 	num_active_bodies.fetch_sub(1, memory_order_release);
+	if (ioBody.IsRigidBody())
+		mActiveBodiesRevision.fetch_add(1, memory_order_release);
 
 	// Count CCD bodies
 	if (mp->GetMotionQuality() == EMotionQuality::LinearCast)

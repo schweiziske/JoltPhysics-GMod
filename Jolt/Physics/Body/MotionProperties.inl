@@ -20,9 +20,28 @@ void MotionProperties::MoveKinematic(Vec3Arg inDeltaPosition, QuatArg inDeltaRot
 	mAngularVelocity = LockAngular(inDeltaRotation.GetAngularVelocity(inDeltaTime));
 }
 
+// Solver impulses are intentionally unclamped until integration. A finite velocity
+// can therefore already be too large to square in float (the crash dump contained
+// 5e20 rad/s). Keep the ordinary SIMD path, using double only for that exceptional
+// range; disabling floating-point exceptions would not make LengthSq safe.
+inline bool ClampExtremeVelocity(Vec3 &ioVelocity, float inMaxVelocity)
+{
+	constexpr float cSafeSquareComponent = 1.0e18f;
+	if (ioVelocity.Abs().ReduceMax() <= cSafeSquareComponent && inMaxVelocity <= cSafeSquareComponent)
+		return false;
+	const double x = ioVelocity.GetX(), y = ioVelocity.GetY(), z = ioVelocity.GetZ();
+	const double length = std::sqrt(x * x + y * y + z * z);
+	JPH_ASSERT(std::isfinite(length));
+	if (length > double(inMaxVelocity))
+		ioVelocity *= float(double(inMaxVelocity) / length);
+	return true;
+}
+
 void MotionProperties::ClampLinearVelocity()
 {
 	JPH_ASSERT(BodyAccess::sCheckRights(BodyAccess::sVelocityAccess(), BodyAccess::EAccess::ReadWrite));
+	if (ClampExtremeVelocity(mLinearVelocity, mMaxLinearVelocity))
+		return;
 
 	float len_sq = mLinearVelocity.LengthSq();
 	JPH_ASSERT(isfinite(len_sq));
@@ -33,6 +52,8 @@ void MotionProperties::ClampLinearVelocity()
 void MotionProperties::ClampAngularVelocity()
 {
 	JPH_ASSERT(BodyAccess::sCheckRights(BodyAccess::sVelocityAccess(), BodyAccess::EAccess::ReadWrite));
+	if (ClampExtremeVelocity(mAngularVelocity, mMaxAngularVelocity))
+		return;
 
 	float len_sq = mAngularVelocity.LengthSq();
 	JPH_ASSERT(isfinite(len_sq));

@@ -84,6 +84,8 @@ void PathConstraint::NotifyShapeChanged(const BodyID &inBodyID, Vec3Arg inDeltaC
 
 void PathConstraint::SetPath(const PathConstraintPath *inPath, float inPathFraction)
 {
+	if ((mPath == nullptr) != (inPath == nullptr))
+		NotifyWakeTopologyChanged();
 	mPath = inPath;
 	mPathFraction = inPathFraction;
 

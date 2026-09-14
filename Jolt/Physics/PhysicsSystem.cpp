@@ -140,6 +140,22 @@ void PhysicsSystem::OptimizeBroadPhase()
 	mBroadPhase->Optimize();
 }
 
+ConstraintManager::WakeStatistics PhysicsSystem::PropagateConstraintWake()
+{
+	if (!mConstraintManager.NeedsWakePropagation(mBodyManager))
+		return {};
+	mBodyManager.LockAllBodies();
+	mConstraintManager.LockAllConstraints();
+#ifdef JPH_ENABLE_ASSERTS
+	BodyAccess::Grant grant(BodyAccess::EAccess::ReadWrite, BodyAccess::EAccess::Read);
+	BodyManager::GrantActiveBodiesAccess grant_active(true, false);
+#endif
+	const auto statistics = mConstraintManager.PropagateWake(mBodyManager);
+	mConstraintManager.UnlockAllConstraints();
+	mBodyManager.UnlockAllBodies();
+	return statistics;
+}
+
 void PhysicsSystem::AddStepListener(PhysicsStepListener *inListener)
 {
 	lock_guard lock(mStepListenersMutex);

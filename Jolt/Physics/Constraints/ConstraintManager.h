@@ -54,7 +54,19 @@ public:
 	/// Close enabled two-body and legacy-group dynamic wake components before the active
 	/// constraint snapshot. The caller holds all body/constraint locks and grants activation.
 	/// This does not join solver islands or change legacy solver member slices.
-	void					PropagateWake(BodyManager &ioBodyManager);
+	struct WakeStatistics
+	{
+		uint32 mScannedConstraints = 0;
+		uint32 mEligibleConstraints = 0;
+		uint32 mDynamicBodies = 0;
+		uint32 mMixedComponents = 0;
+		uint32 mActivationBatchBodies = 0;
+		uint32 mNewlyActivatedBodies = 0;
+	};
+	~ConstraintManager();
+	WakeStatistics			PropagateWake(BodyManager &ioBodyManager);
+	bool					NeedsWakePropagation(const BodyManager &inBodyManager) const;
+	void					InvalidateWakeTopology() { mWakeTopologyRevision.fetch_add(1, memory_order_release); }
 
 	/// Determine the active constraints of a subset of the constraints
 	void					GetActiveConstraints(uint32 inStartConstraintIdx, uint32 inEndConstraintIdx, Constraint **outActiveConstraints, uint32 &outNumActiveConstraints) const;
@@ -130,10 +142,15 @@ private:
 	uint32					FindWakeRoot(uint32 inNode);
 	void					LinkWakeNodes(uint32 inNode1, uint32 inNode2);
 
-	// Reused capacity only, never cached connectivity: rebuild from live world constraints.
+	// Connectivity changes only with constraint membership/eligibility or body motion type.
+	// All those mutation sites invalidate; sleep/wake changes only rescan cached bodies.
+	atomic<uint64>			mWakeTopologyRevision { 1 };
+	uint64					mBuiltWakeTopologyRevision = 0;
+	uint64					mWakeMotionTypeSequence = ~uint64(0);
+	uint64					mWakeActiveBodiesRevision = ~uint64(0);
+	uint32					mWakeEligibleConstraints = 0;
 	Array<WakeNode>			mWakeNodes;
 	UnorderedMap<uint32, uint32> mWakeNodeByBody;
-	UnorderedMap<const LegacyConstraintGroup *, uint8> mWakeGroupState;
 	UnorderedMap<const LegacyConstraintGroup *, uint32> mWakeFirstNodeByGroup;
 	Array<BodyID>			mWakeActivationBatch;
 

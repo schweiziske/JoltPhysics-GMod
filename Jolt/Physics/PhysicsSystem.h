@@ -163,6 +163,10 @@ public:
 	/// Don't call this function while bodies are being modified from another thread or use the locking BodyInterface to modify bodies.
 	void						OptimizeBroadPhase();
 
+	/// Close pending dynamic constraint wakes before external controllers/listeners.
+	/// Shares the native Update cache; serialize with Update, as with OptimizeBroadPhase.
+	ConstraintManager::WakeStatistics PropagateConstraintWake();
+
 	/// Adds a new step listener
 	void						AddStepListener(PhysicsStepListener *inListener);
 

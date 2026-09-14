@@ -14,17 +14,29 @@
 #include <Jolt/Physics/PhysicsLock.h>
 #include <Jolt/Core/Profiler.h>
 #include <Jolt/Core/QuickSort.h>
-#include <unordered_map>
+#include <Jolt/Core/UnorderedMap.h>
+#include <span>
 #include <memory>
 #include <thread>
 
 JPH_NAMESPACE_BEGIN
 
+ConstraintManager::~ConstraintManager()
+{
+	// A caller can retain constraints after destroying a PhysicsSystem.
+	for (const Ref<Constraint> &constraint : mConstraints)
+		constraint->mConstraintManager = nullptr;
+}
+
 void ConstraintManager::Add(Constraint **inConstraints, int inNumber)
 {
 	UniqueLock lock(mConstraintsMutex JPH_IF_ENABLE_ASSERTS(, mLockContext, EPhysicsLockTypes::ConstraintsList));
 
-	mConstraints.reserve(mConstraints.size() + inNumber);
+	// One-at-a-time Source creation must not reallocate/copy every existing Ref.
+	const size_t required = mConstraints.size() + inNumber;
+	if (required > mConstraints.capacity())
+		mConstraints.reserve(max(required, max(size_t(8), mConstraints.capacity() + mConstraints.capacity() / 2)));
+	InvalidateWakeTopology();
 
 	for (Constraint **c = inConstraints, **c_end = inConstraints + inNumber; c < c_end; ++c)
 	{
@@ -35,6 +47,7 @@ void ConstraintManager::Add(Constraint **inConstraints, int inNumber)
 
 		// Add to the list
 		constraint->mConstraintIndex = uint32(mConstraints.size());
+		constraint->mConstraintManager = this;
 		mConstraints.push_back(constraint);
 	}
 }
@@ -50,6 +63,8 @@ void ConstraintManager::Remove(Constraint **inConstraints, int inNumber)
 		// Reset constraint index for this constraint
 		uint32 this_constraint_idx = constraint->mConstraintIndex;
 		constraint->mConstraintIndex = Constraint::cInvalidConstraintIndex;
+		constraint->mConstraintManager = nullptr;
+		InvalidateWakeTopology();
 		JPH_ASSERT(this_constraint_idx != Constraint::cInvalidConstraintIndex);
 
 		// Check if this constraint is somewhere in the middle of the constraints, in this case we need to move the last constraint to this position
@@ -93,91 +108,96 @@ namespace
 	}
 }
 
-void ConstraintManager::PropagateWake(BodyManager &ioBodyManager)
+bool ConstraintManager::NeedsWakePropagation(const BodyManager &inBodyManager) const
+{
+	return inBodyManager.GetNumActiveBodies(EBodyType::RigidBody) != 0
+		&& (mBuiltWakeTopologyRevision != mWakeTopologyRevision.load(memory_order_acquire)
+			|| mWakeMotionTypeSequence != Body::GetMotionTypeChangeSequence()
+			|| mWakeActiveBodiesRevision != inBodyManager.GetActiveBodiesRevision());
+}
+
+ConstraintManager::WakeStatistics ConstraintManager::PropagateWake(BodyManager &ioBodyManager)
 {
 	JPH_PROFILE_FUNCTION();
+	WakeStatistics statistics;
+	if (!NeedsWakePropagation(ioBodyManager))
+		return statistics;
 
-	// No active rigid body means no dynamic wake seed. Do not copy or scan the list.
-	if (ioBodyManager.GetNumActiveBodies(EBodyType::RigidBody) == 0 || mConstraints.empty())
-		return;
-
-	constexpr uint8 cActive = 1, cSleeping = 2;
-	mWakeGroupState.clear();
-	bool has_wake_frontier = false;
-	for (const Ref<Constraint> &constraint : mConstraints)
+	const uint64 topology_revision = mWakeTopologyRevision.load(memory_order_acquire);
+	const uint64 motion_sequence = Body::GetMotionTypeChangeSequence();
+	if (mBuiltWakeTopologyRevision != topology_revision || mWakeMotionTypeSequence != motion_sequence)
 	{
-		if (!IsWakeLinkEnabled(*constraint))
-			continue;
-		const TwoBodyConstraint &two_body = static_cast<const TwoBodyConstraint &>(*constraint);
-		const Body *body1 = two_body.GetBody1(), *body2 = two_body.GetBody2();
-		if (body1->IsDynamic() && body2->IsDynamic() && body1->IsActive() != body2->IsActive())
+		mWakeNodes.clear();
+		mWakeNodeByBody.clear();
+		mWakeFirstNodeByGroup.clear();
+		mWakeEligibleConstraints = 0;
+		statistics.mScannedConstraints = uint32(mConstraints.size());
+		for (const Ref<Constraint> &constraint : mConstraints)
 		{
-			has_wake_frontier = true;
-			break;
-		}
-		if (const LegacyConstraintGroup *group = GetWakeGroup(*constraint))
-		{
-			uint8 state = 0;
-			if (body1->IsDynamic()) state |= body1->IsActive()? cActive : cSleeping;
-			if (body2->IsDynamic()) state |= body2->IsActive()? cActive : cSleeping;
-			if (state == 0)
+			if (!IsWakeLinkEnabled(*constraint))
 				continue;
-			uint8 &group_state = mWakeGroupState[group];
-			group_state |= state;
-			if (group_state == (cActive | cSleeping))
+			const TwoBodyConstraint &two_body = static_cast<const TwoBodyConstraint &>(*constraint);
+			const Body *body1 = two_body.GetBody1(), *body2 = two_body.GetBody2();
+			bool eligible = false;
+			if (body1->IsDynamic() && body2->IsDynamic())
 			{
-				has_wake_frontier = true;
-				break;
+				const uint32 node1 = GetOrCreateWakeNode(*body1);
+				const uint32 node2 = GetOrCreateWakeNode(*body2);
+				LinkWakeNodes(node1, node2);
+				eligible = true;
 			}
-		}
-	}
-	if (!has_wake_frontier)
-		return;
-
-	mWakeNodes.clear();
-	mWakeNodeByBody.clear();
-	mWakeFirstNodeByGroup.clear();
-	mWakeActivationBatch.clear();
-	for (const Ref<Constraint> &constraint : mConstraints)
-	{
-		// IsActive() would omit wholly sleeping links and only wake one wave per step.
-		if (!IsWakeLinkEnabled(*constraint))
-			continue;
-		const TwoBodyConstraint &two_body = static_cast<const TwoBodyConstraint &>(*constraint);
-		const Body *body1 = two_body.GetBody1(), *body2 = two_body.GetBody2();
-		if (body1->IsDynamic() && body2->IsDynamic())
-		{
-			const uint32 node1 = GetOrCreateWakeNode(*body1);
-			const uint32 node2 = GetOrCreateWakeNode(*body2);
-			LinkWakeNodes(node1, node2);
-		}
-		if (const LegacyConstraintGroup *group = GetWakeGroup(*constraint))
-		{
-			// Group dynamic members share a wake state even when separately anchored.
-			// Static/kinematic endpoints are neither seeds nor bridges between groups.
-			auto link_group_body = [&](const Body &inBody)
+			if (const LegacyConstraintGroup *group = GetWakeGroup(*constraint))
 			{
-				if (!inBody.IsDynamic())
-					return;
-				const uint32 node = GetOrCreateWakeNode(inBody);
-				auto [entry, inserted] = mWakeFirstNodeByGroup.try_emplace(group, node);
-				if (!inserted)
-					LinkWakeNodes(entry->second, node);
-			};
-			link_group_body(*body1);
-			link_group_body(*body2);
+				for (const Body *body : { body1, body2 })
+					if (body->IsDynamic())
+					{
+						const uint32 node = GetOrCreateWakeNode(*body);
+						auto [entry, inserted] = mWakeFirstNodeByGroup.try_emplace(group, node);
+						if (!inserted)
+							LinkWakeNodes(entry->second, node);
+						eligible = true;
+					}
+			}
+			if (eligible)
+				++mWakeEligibleConstraints;
 		}
+		// Flatten once: subsequent wake events never traverse constraints or hash maps.
+		for (uint32 i = 0; i < uint32(mWakeNodes.size()); ++i)
+			mWakeNodes[i].mParent = FindWakeRoot(i);
+		mBuiltWakeTopologyRevision = topology_revision;
+		mWakeMotionTypeSequence = motion_sequence;
 	}
 
-	for (uint32 index = 0; index < uint32(mWakeNodes.size()); ++index)
+	for (WakeNode &node : mWakeNodes)
+		node.mHasActiveBody = node.mHasSleepingBody = false;
+	for (const WakeNode &node : mWakeNodes)
 	{
-		const WakeNode &root = mWakeNodes[FindWakeRoot(index)];
-		if (root.mHasActiveBody && root.mHasSleepingBody)
-			mWakeActivationBatch.push_back(mWakeNodes[index].mBodyID);
+		const Body &body = ioBodyManager.GetBody(node.mBodyID);
+		WakeNode &root = mWakeNodes[node.mParent];
+		root.mHasActiveBody |= body.IsActive();
+		root.mHasSleepingBody |= !body.IsActive();
 	}
-	// Include awake members to reset the component's sleep timers together. Activation
-	// callbacks are emitted only for bodies that were actually sleeping.
+	mWakeActivationBatch.clear();
+	for (uint32 i = 0; i < uint32(mWakeNodes.size()); ++i)
+	{
+		const WakeNode &node = mWakeNodes[i];
+		const WakeNode &root = mWakeNodes[node.mParent];
+		if (root.mHasActiveBody && root.mHasSleepingBody)
+		{
+			mWakeActivationBatch.push_back(node.mBodyID);
+			if (node.mParent == i)
+				++statistics.mMixedComponents;
+		}
+	}
+	statistics.mEligibleConstraints = mWakeEligibleConstraints;
+	statistics.mDynamicBodies = uint32(mWakeNodes.size());
+	statistics.mActivationBatchBodies = uint32(mWakeActivationBatch.size());
+	const uint32 active_before = ioBodyManager.GetNumActiveBodies(EBodyType::RigidBody);
+	// Reset the whole mixed component's sleep timers, but notify only actual wakes.
 	ioBodyManager.ActivateBodies(mWakeActivationBatch.data(), int(mWakeActivationBatch.size()));
+	statistics.mNewlyActivatedBodies = ioBodyManager.GetNumActiveBodies(EBodyType::RigidBody) - active_before;
+	mWakeActiveBodiesRevision = ioBodyManager.GetActiveBodiesRevision();
+	return statistics;
 }
 
 uint32 ConstraintManager::GetOrCreateWakeNode(const Body &inBody)
@@ -185,7 +205,7 @@ uint32 ConstraintManager::GetOrCreateWakeNode(const Body &inBody)
 	const uint32 index = uint32(mWakeNodes.size());
 	auto [entry, inserted] = mWakeNodeByBody.try_emplace(inBody.GetID().GetIndexAndSequenceNumber(), index);
 	if (inserted)
-		mWakeNodes.push_back({ inBody.GetID(), index, 1, inBody.IsActive(), !inBody.IsActive() });
+		mWakeNodes.push_back({ inBody.GetID(), index, 1, false, false });
 	return entry->second;
 }
 
@@ -213,8 +233,6 @@ void ConstraintManager::LinkWakeNodes(uint32 inNode1, uint32 inNode2)
 	WakeNode &parent = mWakeNodes[root1], &child = mWakeNodes[root2];
 	child.mParent = root1;
 	parent.mSize += child.mSize;
-	parent.mHasActiveBody |= child.mHasActiveBody;
-	parent.mHasSleepingBody |= child.mHasSleepingBody;
 }
 
 void ConstraintManager::GetActiveConstraints(uint32 inStartConstraintIdx, uint32 inEndConstraintIdx, Constraint **outActiveConstraints, uint32 &outNumActiveConstraints) const
@@ -322,22 +340,54 @@ bool ConstraintManager::sHasLegacyConstraints(Constraint **inActiveConstraints, 
 bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime, JobSystem *inJobSystem, JobSystem::Barrier *inBarrier, atomic<uint> *ioJobBudget)
 {
 	JPH_PROFILE_FUNCTION();
+	// An isolated private Source constraint needs neither an island group table
+	// nor a heap-allocated member list. Keep the exact same local-system solve.
+	if (inConstraintIdxEnd - inConstraintIdxBegin == 1)
+	{
+		Constraint *constraint = inActiveConstraints[*inConstraintIdxBegin];
+		if (LegacyConstraintGroup *group = constraint->GetLegacyConstraintGroup())
+		{
+			constraint->mLegacyPostContactSolveInIsland = constraint->RequiresPostContactLegacySolve();
+			return group->SolveVelocityConstraints(&constraint, 1, inDeltaTime);
+		}
+		return false;
+	}
 
 	struct IslandGroup
 	{
 		LegacyConstraintGroup *mGroup;
+		Constraint *mFirstMember = nullptr;
 		std::vector<Constraint *> mMembers;
 		bool mPostContact = true;
 
+		void AddMember(Constraint *inConstraint)
+		{
+			if (mFirstMember == nullptr)
+				mFirstMember = inConstraint;
+			else
+			{
+				if (mMembers.empty())
+					mMembers.push_back(mFirstMember);
+				mMembers.push_back(inConstraint);
+			}
+		}
+
+		std::span<Constraint *const> GetMembers() const
+		{
+			return mMembers.empty()? std::span<Constraint *const>(&mFirstMember, 1)
+				: std::span<Constraint *const>(mMembers.data(), mMembers.size());
+		}
+
 		bool Solve(float inStepDeltaTime)
 		{
-			for (Constraint *c : mMembers)
+			const auto members = GetMembers();
+			for (Constraint *c : members)
 				c->mLegacyPostContactSolveInIsland = mPostContact;
-			return mGroup->SolveVelocityConstraints(mMembers.data(), mMembers.size(), inStepDeltaTime);
+			return mGroup->SolveVelocityConstraints(members.data(), members.size(), inStepDeltaTime);
 		}
 	};
 	std::vector<IslandGroup> groups;
-	std::unordered_map<LegacyConstraintGroup *, size_t> group_indices;
+	UnorderedMap<LegacyConstraintGroup *, size_t> group_indices;
 	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
 	{
 		Constraint *c = inActiveConstraints[*constraint_idx];
@@ -345,9 +395,9 @@ bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveCon
 		{
 			auto [entry, inserted] = group_indices.try_emplace(group, groups.size());
 			if (inserted)
-				groups.push_back({ group, {}, true });
+				groups.push_back({ group });
 			IslandGroup &batch = groups[entry->second];
-			batch.mMembers.push_back(c);
+			batch.AddMember(c);
 			batch.mPostContact &= c->RequiresPostContactLegacySolve();
 		}
 	}
@@ -374,11 +424,11 @@ bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveCon
 			}
 			return index;
 		};
-		std::unordered_map<const Body *, size_t> body_owners;
+		UnorderedMap<const Body *, size_t> body_owners;
 		body_owners.reserve(size_t(inConstraintIdxEnd - inConstraintIdxBegin));
 		bool known_dependencies = true;
 		for (size_t i = 0; i < groups.size() && known_dependencies; ++i)
-			for (Constraint *c : groups[i].mMembers)
+			for (Constraint *c : groups[i].GetMembers())
 			{
 				if (c->GetType() != EConstraintType::TwoBodyConstraint)
 				{
@@ -552,7 +602,7 @@ bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveCon
 		auto batch = std::make_shared<PreparationBatch>();
 		batch->mEntries.reserve(size_t(inConstraintIdxEnd - inConstraintIdxBegin));
 		for (const IslandGroup &group : groups)
-			for (Constraint *c : group.mMembers)
+			for (Constraint *c : group.GetMembers())
 				if (c->IsActive() && c->CanPrepareLegacyVelocityConstraint())
 				{
 					const size_t index = c->mLegacyGroupIndex;

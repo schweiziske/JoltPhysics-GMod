@@ -5,6 +5,7 @@
 #include <Jolt/Jolt.h>
 
 #include <Jolt/Physics/Constraints/Constraint.h>
+#include <Jolt/Physics/Constraints/ConstraintManager.h>
 #include <Jolt/Physics/Constraints/TwoBodyConstraint.h>
 #include <Jolt/Physics/Constraints/LegacyBreakableState.h>
 #include <Jolt/Physics/StateRecorder.h>
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <span>
 
 JPH_NAMESPACE_BEGIN
 
@@ -91,6 +93,22 @@ void Constraint::SetEnabled(bool inEnabled)
 		return;
 
 	mEnabled = inEnabled;
+	NotifyWakeTopologyChanged();
+}
+
+void Constraint::NotifyWakeTopologyChanged()
+{
+	if (mConstraintManager != nullptr)
+		mConstraintManager->InvalidateWakeTopology();
+}
+
+void Constraint::SetLegacyConstraintGroup(LegacyConstraintGroup *inGroup)
+{
+	if (mLegacyConstraintGroup != inGroup)
+	{
+		mLegacyConstraintGroup = inGroup;
+		NotifyWakeTopologyChanged();
+	}
 }
 
 void Constraint::ToConstraintSettings(ConstraintSettings &outSettings) const
@@ -202,18 +220,35 @@ void LegacyConstraintGroup::RebuildSolverStorageLayout()
 	const size_t storage_words = (storage_size + sizeof(SolverStorageWord) - 1)
 		/ sizeof(SolverStorageWord);
 	mSolverStorage.resize(storage_words);
+	mSolverStorageBytes = storage_size;
 }
 
 void LegacyConstraintGroup::AddConstraint(Constraint *inConstraint)
 {
-	// Membership is exclusive. Moving a constraint must not leave a stale executable entry
-	// in its former Source group.
-	if (LegacyConstraintGroup *previous = inConstraint->GetLegacyConstraintGroup(); previous != nullptr && previous != this)
-		previous->RemoveConstraint(inConstraint);
-	if (std::find(mConstraints.begin(), mConstraints.end(), inConstraint) == mConstraints.end())
+	if (LegacyConstraintGroup *previous = inConstraint->GetLegacyConstraintGroup())
 	{
-		mConstraints.push_back(inConstraint);
-		RebuildSolverStorageLayout();
+		if (previous != this)
+			previous->RemoveConstraint(inConstraint);
+		else if (inConstraint->mLegacyGroupIndex < mConstraints.size()
+			&& mConstraints[inConstraint->mLegacyGroupIndex] == inConstraint)
+			return;
+	}
+	// Append in amortized O(1). Rebuilding every preceding VMQ range made a shared
+	// N-constraint dupe O(N^2) to construct before its first simulation even began.
+	inConstraint->mLegacyGroupIndex = mConstraints.size();
+	mConstraints.push_back(inConstraint);
+	const size_t constraint_size = inConstraint->GetLegacySolverStorageSize();
+	if (constraint_size == 0)
+		mSolverStorageOffsets.push_back(SIZE_MAX);
+	else
+	{
+		const size_t alignment = inConstraint->GetLegacySolverStorageAlignment();
+		JPH_ASSERT(alignment > 0 && alignment <= alignof(SolverStorageWord)
+			&& (alignment & (alignment - 1)) == 0);
+		mSolverStorageBytes = (mSolverStorageBytes + alignment - 1) & ~(alignment - 1);
+		mSolverStorageOffsets.push_back(mSolverStorageBytes);
+		mSolverStorageBytes += constraint_size;
+		mSolverStorage.resize((mSolverStorageBytes + sizeof(SolverStorageWord) - 1) / sizeof(SolverStorageWord));
 	}
 	inConstraint->SetLegacyConstraintGroup(this);
 }
@@ -236,8 +271,14 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *const *inMember
 	// Update and each constraint owns a disjoint storage range. Active lists and break/scan
 	// state are local to this invocation, so disconnected islands can execute concurrently.
 	std::byte *storage_base = reinterpret_cast<std::byte *>(mSolverStorage.data());
-	std::vector<SolverEntry> active_entries;
-	active_entries.reserve(inMemberCount);
+	// Private Source groups normally contain one constraint: no heap allocation
+	// for those controller passes, while keeping scratch local to each island.
+	SolverEntry local_entries[8];
+	std::vector<SolverEntry> allocated_entries;
+	if (inMemberCount > std::size(local_entries))
+		allocated_entries.resize(inMemberCount);
+	SolverEntry *entries = allocated_entries.empty()? local_entries : allocated_entries.data();
+	size_t active_count = 0;
 	for (size_t member = 0; member < inMemberCount; ++member)
 	{
 		Constraint *constraint = inMembers[member];
@@ -248,8 +289,9 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *const *inMember
 			continue;
 		const size_t storage_offset = mSolverStorageOffsets[index];
 		void *solver_storage = storage_offset == SIZE_MAX? nullptr : storage_base + storage_offset;
-		active_entries.push_back({ constraint, solver_storage, index });
+		entries[active_count++] = { constraint, solver_storage, index };
 	}
+	std::span<SolverEntry> active_entries(entries, active_count);
 	// Retain Source insertion order within this island's portion of the local system.
 	std::sort(active_entries.begin(), active_entries.end(), [](const SolverEntry &a, const SolverEntry &b) {
 		return a.mConstraintIndex < b.mConstraintIndex;

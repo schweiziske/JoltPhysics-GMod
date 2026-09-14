@@ -21,6 +21,12 @@ JPH_NAMESPACE_BEGIN
 
 static const EmptyShape sFixedToWorldShape;
 Body Body::sFixedToWorld(false);
+static atomic<uint64> sMotionTypeChangeSequence { 0 };
+
+uint64 Body::GetMotionTypeChangeSequence()
+{
+	return sMotionTypeChangeSequence.load(memory_order_acquire);
+}
 
 Body::Body(bool) :
 	mPosition(Vec3::sZero()),
@@ -45,6 +51,7 @@ void Body::SetMotionType(EMotionType inMotionType)
 
 	// Store new motion type
 	mMotionType = inMotionType;
+	sMotionTypeChangeSequence.fetch_add(1, memory_order_release);
 
 	if (mMotionProperties != nullptr)
 	{

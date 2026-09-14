@@ -15,6 +15,8 @@
 
 JPH_NAMESPACE_BEGIN
 
+class ConstraintManager;
+
 class BodyID;
 class IslandBuilder;
 class LargeIslandSplitter;
@@ -273,7 +275,7 @@ public:
 	/// Debug function to convert a constraint to its settings, note that this will not save to which bodies the constraint is connected to
 	virtual Ref<ConstraintSettings> GetConstraintSettings() const = 0;
 
-	void						SetLegacyConstraintGroup(LegacyConstraintGroup *inGroup) { mLegacyConstraintGroup = inGroup; }
+	void						SetLegacyConstraintGroup(LegacyConstraintGroup *inGroup);
 	LegacyConstraintGroup *		GetLegacyConstraintGroup() const { return mLegacyConstraintGroup; }
 	/// Classification of this step's island-local group slice, never of remote group members.
 	bool						RequiresPostContactSolveInIsland() const { return mLegacyPostContactSolveInIsland; }
@@ -287,6 +289,10 @@ protected:
 	float						mDrawConstraintSize;
 #endif // JPH_DEBUG_RENDERER
 
+protected:
+	/// Derived constraints must invalidate when their wake-link eligibility changes.
+	void						NotifyWakeTopologyChanged();
+
 private:
 	friend class ConstraintManager;
 	friend class LegacyConstraintGroup;
@@ -296,6 +302,7 @@ private:
 
 	/// Index in the mConstraints list of the ConstraintManager for easy finding
 	uint32						mConstraintIndex = cInvalidConstraintIndex;
+	ConstraintManager *			mConstraintManager = nullptr;
 
 	/// Priority of the constraint when solving. Higher numbers have are more likely to be solved correctly.
 	uint32						mConstraintPriority = 0;
@@ -366,6 +373,7 @@ private:
 	std::vector<Constraint *>		mConstraints;
 	std::vector<size_t>			mSolverStorageOffsets;
 	std::vector<SolverStorageWord>	mSolverStorage;
+	size_t						mSolverStorageBytes = 0;
 	int							mAdditionalIterations = 0;
 	bool						mRollbackOnBreak = false;
 };

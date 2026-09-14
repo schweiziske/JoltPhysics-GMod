@@ -122,6 +122,9 @@ public:
 	/// Get the number of active bodies.
 	uint32							GetNumActiveBodies(EBodyType inType) const	{ return mNumActiveBodies[int(inType)].load(memory_order_acquire); }
 
+	/// Changes for actual activation/deactivation, not for repeated sleep-timer resets.
+	uint64							GetActiveBodiesRevision() const { return mActiveBodiesRevision.load(memory_order_acquire); }
+
 	/// Get the number of active bodies that are using continuous collision detection
 	uint32							GetNumActiveCCDBodies() const				{ return mNumActiveCCDBodies; }
 
@@ -373,6 +376,7 @@ private:
 
 	/// How many bodies there are in the list of active bodies
 	atomic<uint32>					mNumActiveBodies[cBodyTypeCount] = { };
+	atomic<uint64>					mActiveBodiesRevision { 0 };
 
 	/// How many of the active bodies have continuous collision detection enabled
 	uint32							mNumActiveCCDBodies = 0;
