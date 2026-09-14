@@ -309,13 +309,9 @@ EPhysicsUpdateError PhysicsSystem::Update(float inDeltaTime, int inCollisionStep
 	// Number of integrate velocity jobs depends on number of active bodies.
 	int num_integrate_velocity_jobs = max(1, min(((int)num_active_rigid_bodies + cIntegrateVelocityBatchSize - 1) / cIntegrateVelocityBatchSize, max_concurrency));
 
-	// Avoid a full pool of mostly empty solver jobs in small worlds. This only
-	// changes scheduling: every island and splitter batch is still consumed.
-	// Account for constraint work as well as the initially awake bodies. Bodies
-	// activated later in the update are still processed by these same jobs.
-	constexpr uint32 cSolverBodiesPerJob = 64;
-	const uint32 solver_work = max(num_active_rigid_bodies, mConstraintManager.GetNumConstraints());
-	const int num_solve_jobs = max(1, min(int((solver_work + cSolverBodiesPerJob - 1) / cSolverBodiesPerJob), max_concurrency));
+	// Follow native Jolt: solver jobs share the islands and large-island batches.
+	// Initial body/constraint counts do not include contact work or later wakes.
+	const int num_solve_jobs = max_concurrency;
 
 	{
 		JPH_PROFILE("Build Jobs");
