@@ -70,7 +70,8 @@ inline void PrintVector(FILE *inFile, const char *inName, Vec3Arg inValue)
 
 inline void Check(const char *inStage, uint32 inIndex, const Body &inBody1, const Body &inBody2,
 	const State &inBefore, Vec3Arg inDisplacement = Vec3::sZero(), float inNormalLambda = 0.0f,
-	const char *inEdge = "output", uint32 inSubType = ~uint32(0))
+	const char *inEdge = "output", uint32 inSubType = ~uint32(0),
+	void (*inWriteDetails)(FILE *, const void *) = nullptr, const void *inDetails = nullptr)
 {
 	const State after(inBody1, inBody2);
 	if (!inBefore.IsExtreme() && !after.IsExtreme()
@@ -95,6 +96,8 @@ inline void Check(const char *inStage, uint32 inIndex, const Body &inBody1, cons
 	PrintVector(file, "after_v2", after.mV2); PrintVector(file, "after_w2", after.mW2);
 	PrintVector(file, "displacement", inDisplacement);
 	std::fprintf(file, "normal_lambda=%08x\n", std::bit_cast<uint32>(inNormalLambda));
+	if (inWriteDetails != nullptr)
+		inWriteDetails(file, inDetails);
 	std::fclose(file);
 }
 
