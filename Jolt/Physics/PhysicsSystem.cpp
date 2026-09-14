@@ -1512,6 +1512,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					uint64 start_tick = GetProcessorTickCount();
 				#endif
 
+					bool applied_impulse = false;
 					if (first_iteration)
 					{
 						// Iteration 0 is used to warm start the batch (we added 1 to the number of iterations in LargeIslandSplitter::SplitIsland)
@@ -1522,22 +1523,33 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					else
 					{
 						// Solve velocity constraints
-						ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
-						mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
+						applied_impulse = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
+						applied_impulse |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
 					}
+
+					// Native cache writes can also accumulate body integration corrections. Keep
+					// those writes inside this color's body ownership, before publishing the next.
+					if (!mLargeIslandSplitter.IsVelocityOnly(split_island_index)
+						&& mLargeIslandSplitter.IsLastIteration(split_island_index))
+						mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
 
 					// Mark the batch as processed
 					bool last_iteration, final_batch;
-					mLargeIslandSplitter.MarkBatchProcessed(split_island_index, constraints_begin, constraints_end, contacts_begin, contacts_end, last_iteration, final_batch);
-
-					// Restore per-batch publication; there is no whole-island refinement.
-					if (last_iteration)
-						mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
+					mLargeIslandSplitter.MarkBatchProcessed(split_island_index, constraints_begin, constraints_end, contacts_begin, contacts_end, last_iteration, final_batch, applied_impulse);
 
 					if (final_batch)
 					{
 						JPH_ASSERT(last_iteration);
 						const uint32 island_idx = mLargeIslandSplitter.GetIslandIndex(split_island_index);
+						uint32 *island_contacts_begin, *island_contacts_end;
+						mIslandBuilder.GetContactsInIsland(island_idx, island_contacts_begin, island_contacts_end);
+						// Legacy friction integrates final island velocities, after every native
+						// iteration. The integration jobs still depend on this worker's completion.
+						if (mLargeIslandSplitter.IsVelocityOnly(split_island_index))
+						{
+							mContactManager.IntegrateLegacyFrictionState(island_contacts_begin, island_contacts_end, delta_time);
+							mContactManager.StoreAppliedImpulses(island_contacts_begin, island_contacts_end);
+						}
 						const uint velocity_steps = mLargeIslandSplitter.GetNumVelocitySteps(split_island_index);
 						if (mIslandDebugEnabled)
 							mDebugIslands[island_idx].mVelocitySteps = velocity_steps;
@@ -1626,6 +1638,10 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				contacts_begin, contacts_end);
 			const bool has_legacy_friction = mContactManager.AreAnyContactsUsingLegacyFriction(
 				contacts_begin, contacts_end);
+			const bool split_after_legacy = mPhysicsSettings.mUseLargeIslandSplitter
+				&& (has_legacy_constraints || has_legacy_friction)
+				&& LargeIslandSplitter::sCanSplitIsland(active_constraints, constraints_begin, constraints_end,
+					uint(contacts_end - contacts_begin), has_vphysics_contacts);
 			// Each island has one owner here, so workers write distinct elements.
 			if (mIslandDebugEnabled)
 				mDebugIslands[island_idx].mMode = DebugIslandMode::Split;
@@ -1714,6 +1730,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 							v2.GetX(), v2.GetY(), v2.GetZ(), w2.GetX(), w2.GetY(), w2.GetZ());
 					}
 				};
+				uint remaining_velocity_steps = 0;
 				for (uint velocity_step = 0; velocity_step < num_velocity_steps; ++velocity_step)
 				{
 					bool applied_impulse = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
@@ -1749,14 +1766,40 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					// Native contacts retain their ordinary iterative solve even in a mixed
 					// island. The manager excludes contacts owned by the legacy phases.
 					applied_impulse |= mContactManager.SolveVelocityConstraints(contacts_begin, contacts_end);
+					if (split_after_legacy)
+					{
+						// The first iteration, including every ordered compatibility phase, is
+						// complete. Publish only the remaining native iterations to Jolt workers.
+						remaining_velocity_steps = applied_impulse? num_velocity_steps - 1 : 0;
+						break;
+					}
 					if (!applied_impulse)
 						break;
 				}
-				if (has_legacy_friction || has_vphysics_contacts)
-					mContactManager.IntegrateLegacyFrictionState(contacts_begin, contacts_end, delta_time);
+				if (!split_after_legacy || remaining_velocity_steps == 0)
+				{
+					if (has_legacy_friction || has_vphysics_contacts)
+						mContactManager.IntegrateLegacyFrictionState(contacts_begin, contacts_end, delta_time);
 
-				// Save back the lambdas in the contact cache for the warm start of the next physics update
-				mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
+					// A zero-iteration split has no final worker, so finalize before publishing it.
+					mContactManager.StoreAppliedImpulses(contacts_begin, contacts_end);
+				}
+				if (split_after_legacy)
+				{
+					if (mIslandDebugEnabled)
+					{
+						mDebugIslands[island_idx].mMode = DebugIslandMode::SplitVelocity;
+						mDebugIslands[island_idx].mVelocitySteps = num_velocity_steps;
+					}
+				#ifdef JPH_TRACK_SIMULATION_STATS
+					mIslandBuilder.GetIslandStats(island_idx).mNumVelocitySteps = num_velocity_steps;
+				#endif
+					// Prepare reserved this slot even when the first iteration converged. Publish
+					// an empty velocity schedule in that case so other workers can finish.
+					is_large_island = mLargeIslandSplitter.SplitIsland(island_idx, mIslandBuilder, mBodyManager,
+						mContactManager, active_constraints, steps_calculator, true, remaining_velocity_steps);
+					JPH_ASSERT(is_large_island);
+				}
 			}
 
 			if (mIslandDebugEnabled)

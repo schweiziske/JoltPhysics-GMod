@@ -95,7 +95,7 @@ public:
 		EStatus				FetchNextBatch(uint32 &outConstraintsBegin, uint32 &outConstraintsEnd, uint32 &outContactsBegin, uint32 &outContactsEnd, bool &outFirstIteration);
 
 		/// Mark a batch as processed
-		void				MarkBatchProcessed(uint inNumProcessed, bool &outLastIteration, bool &outFinalBatch);
+		void				MarkBatchProcessed(uint inNumProcessed, bool &outLastIteration, bool &outFinalBatch, bool inAppliedImpulse);
 
 		enum EIterationStatus : uint64
 		{
@@ -127,6 +127,8 @@ public:
 		int					mNumIterations;										///< Number of iterations to do
 		int					mNumVelocitySteps;									///< Number of velocity steps to do (cached for 2nd sub step)
 		int					mNumPositionSteps;									///< Number of position steps to do
+		bool				mVelocityOnly;										///< Ordered compatibility pass already completed; positions stay whole-island
+		atomic<bool>		mIterationAppliedImpulse;							///< Reduction for whole-island early convergence after the compatibility pass
 		atomic<uint64>		mStatus;											///< Status of the split, see EIterationStatus
 		atomic<uint>		mItemsProcessed;									///< Number of items that have been marked as processed
 	};
@@ -145,13 +147,25 @@ public:
 	uint					AssignToNonParallelSplit(const Body *inBody);
 
 	/// Splits up an island, the created splits will be added to the list of batches and can be fetched with FetchNextBatch. Returns false if the island did not need splitting.
-	bool					SplitIsland(uint32 inIslandIndex, const IslandBuilder &inIslandBuilder, const BodyManager &inBodyManager, const ContactConstraintManager &inContactManager, Constraint **inActiveConstraints, CalculateSolverSteps &ioStepsCalculator);
+	bool					SplitIsland(uint32 inIslandIndex, const IslandBuilder &inIslandBuilder, const BodyManager &inBodyManager, const ContactConstraintManager &inContactManager, Constraint **inActiveConstraints, CalculateSolverSteps &ioStepsCalculator, bool inVelocityOnly = false, uint inRemainingVelocitySteps = 0);
+
+	/// Count only work that the native iterative solver actually executes. Used both before and after contact indices become offsets.
+	static bool				sCanSplitIsland(Constraint **inActiveConstraints, const uint32 *inConstraintsBegin, const uint32 *inConstraintsEnd, uint inNumContacts, bool inHasVPhysicsContacts);
+
+	inline bool				IsVelocityOnly(uint inSplitIslandIndex) const { return mSplitIslands[inSplitIslandIndex].mVelocityOnly; }
+
+	/// The caller must still own an unretired batch, which keeps its iteration stable.
+	inline bool				IsLastIteration(uint inSplitIslandIndex) const
+	{
+		const Splits &s = mSplitIslands[inSplitIslandIndex];
+		return Splits::sGetIteration(s.mStatus.load(memory_order_relaxed)) == s.mNumIterations - 1;
+	}
 
 	/// Fetch the next batch to process, returns a handle in outSplitIslandIndex that must be provided to MarkBatchProcessed when complete
 	EStatus					FetchNextBatch(uint &outSplitIslandIndex, uint32 *&outConstraintsBegin, uint32 *&outConstraintsEnd, uint32 *&outContactsBegin, uint32 *&outContactsEnd, bool &outFirstIteration);
 
 	/// Mark a batch as processed
-	void					MarkBatchProcessed(uint inSplitIslandIndex, const uint32 *inConstraintsBegin, const uint32 *inConstraintsEnd, const uint32 *inContactsBegin, const uint32 *inContactsEnd, bool &outLastIteration, bool &outFinalBatch);
+	void					MarkBatchProcessed(uint inSplitIslandIndex, const uint32 *inConstraintsBegin, const uint32 *inConstraintsEnd, const uint32 *inContactsBegin, const uint32 *inContactsEnd, bool &outLastIteration, bool &outFinalBatch, bool inAppliedImpulse = true);
 
 	/// Get the island index of the island that was split for a particular split island index
 	inline uint32			GetIslandIndex(uint inSplitIslandIndex) const

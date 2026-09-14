@@ -3469,7 +3469,7 @@ bool ContactConstraintManager::AreAnyContactsUsingLegacyFriction(const uint32 *i
 	return false;
 }
 
-bool ContactConstraintManager::AreAnyContactIndicesUsingLegacySolver(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const
+bool ContactConstraintManager::AreAnyContactIndicesUsingLegacySolver(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, bool inIncludeFriction) const
 {
 	if (inConstraintIdxBegin >= inConstraintIdxEnd)
 		return false;
@@ -3482,7 +3482,7 @@ bool ContactConstraintManager::AreAnyContactIndicesUsingLegacySolver(const uint3
 	{
 		const uint32 offset = mConstraintIdxToOffset[*idx];
 		const ContactConstraintBase &constraint = *reinterpret_cast<const ContactConstraintBase *>(mConstraints + offset);
-		if (constraint.mUseVPhysicsSolver || constraint.mUseLegacyFriction)
+		if (constraint.mUseVPhysicsSolver || (inIncludeFriction && constraint.mUseLegacyFriction))
 			return true;
 	}
 	return false;

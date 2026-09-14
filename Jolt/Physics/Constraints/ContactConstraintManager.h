@@ -254,7 +254,7 @@ public:
 	bool						AreAnyContactsUsingVPhysicsSolver(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
 	bool						AreAnyContactsUsingLegacyFriction(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;
 	/// Compatibility contacts require the full controller schedule, including legacy-friction-only contacts.
-	bool						AreAnyContactIndicesUsingLegacySolver(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd) const;
+	bool						AreAnyContactIndicesUsingLegacySolver(const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, bool inIncludeFriction = true) const;
 
 	/// Save back the lambdas to the contact cache for the next warm start
 	void						StoreAppliedImpulses(const uint32 *inConstraintOffsetBegin, const uint32 *inConstraintOffsetEnd) const;

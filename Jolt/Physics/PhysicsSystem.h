@@ -34,7 +34,7 @@ public:
 	/// Optional diagnostics. Enable/read only outside Update. Data describes the last
 	/// collision substep, copied after all workers finish and before island buffers expire.
 	/// Island indices are temporary; mKey is the lowest full BodyID in that island.
-	enum class DebugIslandMode : uint8 { Free, Whole, Split, Legacy, SplitterOff };
+	enum class DebugIslandMode : uint8 { Free, Whole, Split, Legacy, SplitterOff, SplitVelocity };
 	struct DebugIsland
 	{
 		uint32 mIndex = 0, mKey = BodyID::cInvalidBodyID;
