@@ -1709,9 +1709,19 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				// boundaries. A Havana constraint must not force every ordinary contact in
 				// its island off Jolt's warm-started iterative contact solver.
 				ConstraintManager::sWarmStartVelocityConstraints(active_constraints, constraints_begin, constraints_end, warm_start_impulse_ratio, steps_calculator);
-				// The contact manager selects warm starting per contact. A single legacy
-				// contact must not disable cached native support elsewhere in this island.
-				mContactManager.WarmStartVelocityConstraints(contacts_begin, contacts_end, warm_start_impulse_ratio, steps_calculator);
+				// Welds and legacy friction run once, outside the native contact iterations.
+				// They must not react to a contact warm start's temporary velocities: their
+				// response would survive when the native solver corrects that initial guess,
+				// pumping energy into resting welds. Count contact steps now and replay the
+				// cached impulses after those controllers, immediately before contact solving.
+				// Keep limits/motors and mixed constraint islands on their established phase
+				// order. Deferral is an explicit capability, not a side effect of preparation.
+				const bool defer_contact_warm_start = has_legacy_constraints
+					&& ConstraintManager::sSupportsDeferredContactWarmStart(active_constraints, constraints_begin, constraints_end);
+				if (defer_contact_warm_start)
+					mContactManager.RegisterVelocityConstraints(contacts_begin, contacts_end, steps_calculator);
+				else
+					mContactManager.WarmStartVelocityConstraints(contacts_begin, contacts_end, warm_start_impulse_ratio, steps_calculator);
 				steps_calculator.Finalize();
 
 				// Store the number of position steps for later
@@ -1753,6 +1763,11 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					bool is_large_island = false;
 					if (has_legacy_constraints && num_velocity_steps > 0)
 						trace_legacy_bodies("after_havana");
+					if (defer_contact_warm_start)
+					{
+						DummyCalculateSolverSteps warm_start_steps;
+						mContactManager.WarmStartVelocityConstraints(contacts_begin, contacts_end, warm_start_impulse_ratio, warm_start_steps);
+					}
 					uint remaining_velocity_steps = 0;
 					for (uint velocity_step = 0; velocity_step < num_velocity_steps; ++velocity_step)
 					{
