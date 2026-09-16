@@ -125,7 +125,14 @@ bool GearConstraint::SolvePositionConstraint(float inDeltaTime, float inBaumgart
 		return false;
 	}
 
-	float error = CenterAngleAroundZero(fmod(gear1rot + mRatio * gear2rot, 2.0f * JPH_PI));
+	// Hinge angles wrap at +/- pi. Weight their continuous increments instead of
+	// the wrapped angles, otherwise fractional ratios jump phase at every turn.
+	float delta1 = CenterAngleAroundZero(gear1rot - mPreviousAngle1);
+	float delta2 = CenterAngleAroundZero(gear2rot - mPreviousAngle2);
+	mPreviousAngle1 = gear1rot;
+	mPreviousAngle2 = gear2rot;
+	mRotationError = CenterAngleAroundZero(fmod(mRotationError + delta1 + mRatio * delta2, 2.0f * JPH_PI));
+	float error = mRotationError;
 	if (error == 0.0f)
 		return false;
 
@@ -152,6 +159,9 @@ void GearConstraint::SaveState(StateRecorder &inStream) const
 {
 	TwoBodyConstraint::SaveState(inStream);
 
+	inStream.Write(mPreviousAngle1);
+	inStream.Write(mPreviousAngle2);
+	inStream.Write(mRotationError);
 	mGearConstraintPart.SaveState(inStream);
 }
 
@@ -159,6 +169,9 @@ void GearConstraint::RestoreState(StateRecorder &inStream)
 {
 	TwoBodyConstraint::RestoreState(inStream);
 
+	inStream.Read(mPreviousAngle1);
+	inStream.Read(mPreviousAngle2);
+	inStream.Read(mRotationError);
 	mGearConstraintPart.RestoreState(inStream);
 }
 

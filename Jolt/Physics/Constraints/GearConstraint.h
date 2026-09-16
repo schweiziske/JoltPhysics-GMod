@@ -109,6 +109,11 @@ private:
 	// World space hinge axis for body 2
 	Vec3						mWorldSpaceHingeAxis2;
 
+	// Continuous phase tracking, independent of each hinge's angle wrapping.
+	float						mPreviousAngle1 = 0.0f;
+	float						mPreviousAngle2 = 0.0f;
+	float						mRotationError = 0.0f;
+
 	// The constraint parts
 	GearConstraintPart			mGearConstraintPart;
 };
