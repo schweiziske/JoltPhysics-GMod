@@ -220,10 +220,6 @@ public:
 	/// takes the post-contact path only when every active member opts in.
 	virtual bool				RequiresPostContactLegacySolve() const { return false; }
 
-	/// Opt in to replaying contact warm starts after the legacy solve, only when every
-	/// active constraint in the island opts in. Limits, motors and mixed/native
-	/// constraints retain their existing ordering unless explicitly validated.
-	virtual bool				SupportsDeferredContactWarmStart() const { return false; }
 	/// Per-scan coefficients used by Source/Havana local constraint systems. Native Jolt
 	/// constraints ignore these; compatibility constraints consume them during SolveVelocityConstraint.
 	virtual void				SetLegacySolveFactors(float inTauFactor, float inDampingFactor) { }

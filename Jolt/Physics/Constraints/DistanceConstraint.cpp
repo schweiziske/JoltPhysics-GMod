@@ -134,6 +134,15 @@ void DistanceConstraint::CalculateConstraintProperties(float inDeltaTime)
 	mWorldSpacePosition1 = mBody1->GetCenterOfMassTransform() * mLocalSpacePosition1;
 	mWorldSpacePosition2 = mBody2->GetCenterOfMassTransform() * mLocalSpacePosition2;
 
+	// An unbounded link has no physical limit, including when its anchors coincide.
+	// Otherwise the zero-distance branch below activates a fictitious lower limit
+	// along an arbitrary normal and changes motion despite there being no force.
+	if (IsUnbounded())
+	{
+		mAxisConstraint.Deactivate();
+		return;
+	}
+
 	// Calculate world space normal
 	Vec3 delta = Vec3(mWorldSpacePosition2 - mWorldSpacePosition1);
 	float delta_len = delta.Length();
@@ -279,7 +288,7 @@ bool DistanceConstraint::SolveVelocityOnlyConstraintStep()
 
 bool DistanceConstraint::SolvePositionConstraint(float inDeltaTime, float inBaumgarte)
 {
-	if (mUseVelocityOnlySolver)
+	if (mUseVelocityOnlySolver || IsUnbounded())
 		return false;
 
 	if (mLimitsSpringSettings.mFrequency <= 0.0f) // When the spring is active, we don't need to solve the position constraint

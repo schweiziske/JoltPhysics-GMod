@@ -1709,15 +1709,15 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 				// boundaries. A Havana constraint must not force every ordinary contact in
 				// its island off Jolt's warm-started iterative contact solver.
 				ConstraintManager::sWarmStartVelocityConstraints(active_constraints, constraints_begin, constraints_end, warm_start_impulse_ratio, steps_calculator);
-				// Welds and legacy friction run once, outside the native contact iterations.
+				// Legacy constraints and friction run outside the native contact iterations.
 				// They must not react to a contact warm start's temporary velocities: their
 				// response would survive when the native solver corrects that initial guess,
-				// pumping energy into resting welds. Count contact steps now and replay the
+				// pumping energy into resting constraint networks. Count contact steps now and replay the
 				// cached impulses after those controllers, immediately before contact solving.
-				// Keep limits/motors and mixed constraint islands on their established phase
-				// order. Deferral is an explicit capability, not a side effect of preparation.
-				const bool defer_contact_warm_start = has_legacy_constraints
-					&& ConstraintManager::sSupportsDeferredContactWarmStart(active_constraints, constraints_begin, constraints_end);
+				// This is a controller-stage boundary, independent of constraint subtype or
+				// other native members in the island. Friction also needs this ordering when
+				// the island contains no joints, including the VPhysics contact path.
+				const bool defer_contact_warm_start = has_legacy_constraints || has_legacy_friction || has_vphysics_contacts;
 				if (defer_contact_warm_start)
 					mContactManager.RegisterVelocityConstraints(contacts_begin, contacts_end, steps_calculator);
 				else

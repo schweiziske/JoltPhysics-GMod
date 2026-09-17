@@ -109,6 +109,9 @@ public:
 	const VelocityOnlyDebugStats &GetVelocityOnlyDebugStats() const							{ return mVelocityOnlyDebugStats; }
 	Vec3						GetWorldSpaceNormal() const								{ return mWorldSpaceNormal; }
 private:
+	// [0, infinity] carries island/activation connectivity without a distance equation.
+	bool						IsUnbounded() const										{ return mMinDistance == 0.0f && mMaxDistance == FLT_MAX; }
+
 	// Internal helper function to calculate the values below
 	void						CalculateConstraintProperties(float inDeltaTime);
 	bool						SolveVelocityOnlyConstraintStep();

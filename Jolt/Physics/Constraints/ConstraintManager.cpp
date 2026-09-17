@@ -582,17 +582,6 @@ bool ConstraintManager::LegacyVelocityScheduler::TryExecute()
 	return false;
 }
 
-bool ConstraintManager::sSupportsDeferredContactWarmStart(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd)
-{
-	for (const uint32 *constraint_idx = inConstraintIdxBegin; constraint_idx < inConstraintIdxEnd; ++constraint_idx)
-	{
-		const Constraint *constraint = inActiveConstraints[*constraint_idx];
-		if (constraint->GetLegacyConstraintGroup() == nullptr || !constraint->SupportsDeferredContactWarmStart())
-			return false;
-	}
-	return inConstraintIdxBegin != inConstraintIdxEnd;
-}
-
 bool ConstraintManager::sSolveLegacyVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inBegin, const uint32 *inEnd, float inDeltaTime)
 {
 	JPH_PROFILE_FUNCTION();

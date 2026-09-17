@@ -96,7 +96,6 @@ public:
 	static bool				sSolveVelocityConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd, float inDeltaTime);
 
 	static bool				sHasLegacyConstraints(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
-	static bool				sSupportsDeferredContactWarmStart(Constraint **inActiveConstraints, const uint32 *inConstraintIdxBegin, const uint32 *inConstraintIdxEnd);
 
 	/// One island's ordered groups. The scheduler owns this storage until every native
 	/// velocity job returns, including readers that already observed a completed batch.
