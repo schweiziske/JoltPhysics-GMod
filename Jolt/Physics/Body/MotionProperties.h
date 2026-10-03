@@ -103,6 +103,7 @@ public:
 
 	/// Diagonal of inverse inertia matrix: D. Should only be called on a dynamic object (static or kinematic bodies have infinite mass so should be treated as D = 0)
 	inline Vec3				GetInverseInertiaDiagonal() const								{ JPH_ASSERT(mCachedMotionType == EMotionType::Dynamic); return mInvInertiaDiagonal; }
+	inline Vec3				GetInverseInertiaDiagonalUnchecked() const { return mInvInertiaDiagonal; }
 
 	/// Rotation (R) that takes inverse inertia diagonal to local space: \f$I_{body}^{-1} = R \: D \: R^{-1}\f$
 	inline Quat				GetInertiaRotation() const										{ return mInertiaRotation; }

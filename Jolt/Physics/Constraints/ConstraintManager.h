@@ -49,7 +49,7 @@ public:
 
 	/// Get a list of all constraints
 	Constraints				GetConstraints() const;
-	Constraints				GetConstraintsNoLock() const { return mConstraints; }
+	const Constraints &		GetConstraintsNoLock() const { return mConstraints; }
 
 	/// Get total number of constraints
 	inline uint32			GetNumConstraints() const					{ return uint32(mConstraints.size()); }

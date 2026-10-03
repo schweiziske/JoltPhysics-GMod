@@ -46,6 +46,9 @@ public:
 		bool mBothDynamic = false;
 	};
 	void GetDebugContacts(const uint32 *inBegin, const uint32 *inEnd, Array<DebugContact> &outContacts) const;
+	/// Source callback owner only, with all solver jobs parked. Motion types and
+	/// contact topology must remain unchanged; refresh mass/material equations.
+	void RefreshCallbackBodyProperties(const Body &inBody);
 
 	/// Constructor
 	explicit					ContactConstraintManager(const PhysicsSettings &inPhysicsSettings);
@@ -534,8 +537,10 @@ private:
 		float					mCombinedRestitution;
 		float					mMinVelocityForRestitution;
 		float					mInvMass1;
+		float					mInvMassScale1;
 		float					mInvInertiaScale1;
 		float					mInvMass2;
+		float					mInvMassScale2;
 		float					mInvInertiaScale2;
 		float					mPlayerSupportStartupInitialNormalVelocity1 = 0.0f;
 		float					mPlayerSupportStartupInitialNormalVelocity2 = 0.0f;
@@ -584,6 +589,9 @@ public:
 
 private:
 	/// Create a new contact constraint
+	template <EMotionType Type1, EMotionType Type2>
+	static void sRefreshCallbackConstraint(ContactConstraintBase &ioConstraint);
+
 	template <EMotionType Type1, EMotionType Type2>
 	JPH_INLINE ContactConstraint<Type1, Type2> *CreateConstraint(bool &ioActivateAndLinkBodies, Body &inBody1, Body &inBody2, uint64 inSortKey, Vec3Arg inWorldSpaceNormal, const ContactSettings &inSettings, uint32 inNumContactPoints);
 

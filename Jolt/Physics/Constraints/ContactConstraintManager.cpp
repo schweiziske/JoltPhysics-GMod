@@ -926,6 +926,8 @@ JPH_INLINE ContactConstraintManager::ContactConstraint<Type1, Type2> *ContactCon
 	constraint->mMinVelocityForRestitution = mPhysicsSettings.mMinVelocityForRestitution;
 	constraint->mInvInertiaScale1 = inSettings.mInvInertiaScale1;
 	constraint->mInvInertiaScale2 = inSettings.mInvInertiaScale2;
+	constraint->mInvMassScale1 = inSettings.mInvMassScale1;
+	constraint->mInvMassScale2 = inSettings.mInvMassScale2;
 	constraint->mNumContactPoints = inNumContactPoints;
 	constraint->mTrackContactResponse = inSettings.mTrackContactResponse;
 	constraint->mUseVPhysicsSolver = inSettings.mVPhysicsUseLegacySolver;
@@ -1933,6 +1935,65 @@ bool ContactConstraintManager::WereBodiesInContact(const BodyID &inBody1ID, cons
 	uint64 key_hash = key.GetHash();
 	const BPKeyValue *kv = read_cache.Find(key, key_hash);
 	return kv != nullptr && kv->GetValue().mFirstCachedManifold != ManifoldMap::cInvalidHandle;
+}
+
+template <EMotionType Type1, EMotionType Type2>
+void ContactConstraintManager::sRefreshCallbackConstraint(ContactConstraintBase &ioConstraint)
+{
+	auto &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
+	const Body &body1 = *constraint.mBody1, &body2 = *constraint.mBody2;
+	Mat44 inv_i1 = Mat44::sZero(), inv_i2 = Mat44::sZero();
+	if constexpr (Type1 == EMotionType::Dynamic)
+	{
+		constraint.mInvMass1 = constraint.mInvMassScale1 * body1.GetMotionProperties()->GetInverseMass();
+		inv_i1 = constraint.mInvInertiaScale1 * body1.GetInverseInertia();
+	}
+	if constexpr (Type2 == EMotionType::Dynamic)
+	{
+		constraint.mInvMass2 = constraint.mInvMassScale2 * body2.GetMotionProperties()->GetInverseMass();
+		inv_i2 = constraint.mInvInertiaScale2 * body2.GetInverseInertia();
+	}
+	// Keep the material/contact policy selected by OnContactAdded/Persisted.
+	// The generic combine callbacks cannot reproduce triangle materials, player
+	// restitution overrides or the selected solver path for this manifold.
+	const RMat44 transform1 = body1.GetCenterOfMassTransform(), transform2 = body2.GetCenterOfMassTransform();
+	const Vec3 normal = constraint.GetWorldSpaceNormal();
+	Vec3 t1, t2;
+	constraint.GetTangents(t1, t2);
+	for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
+	{
+		auto &point = constraint.mContactPoints[i];
+		const RVec3 p = 0.5_r * (transform1 * Vec3::sLoadFloat3Unsafe(point.mContactPoint->mPosition1)
+			+ transform2 * Vec3::sLoadFloat3Unsafe(point.mContactPoint->mPosition2));
+		const Vec3 r1 = Vec3(p - transform1.GetTranslation()), r2 = Vec3(p - transform2.GetTranslation());
+		// Preserve accumulated impulses and restitution/penetration targets. Only
+		// the effective mass and impulse-to-velocity mapping have changed.
+		for (auto row : { &point.mNonPenetrationConstraint, &point.mFrictionConstraint1, &point.mFrictionConstraint2 })
+		{
+			const Vec3 axis = row == &point.mNonPenetrationConstraint ? normal : row == &point.mFrictionConstraint1 ? t1 : t2;
+			if (row->IsActive())
+				row->CalculateConstraintProperties(constraint.mInvMass1, inv_i1, r1, constraint.mInvMass2, inv_i2, r2, axis, row->GetVelocityBias());
+		}
+	}
+}
+
+void ContactConstraintManager::RefreshCallbackBodyProperties(const Body &inBody)
+{
+	if (mUpdateContext == nullptr) return;
+	using Refresh = void (*)(ContactConstraintBase &);
+	static const Refresh table[3][3] = {
+		{ nullptr, nullptr, sRefreshCallbackConstraint<EMotionType::Static, EMotionType::Dynamic> },
+		{ nullptr, nullptr, sRefreshCallbackConstraint<EMotionType::Kinematic, EMotionType::Dynamic> },
+		{ sRefreshCallbackConstraint<EMotionType::Dynamic, EMotionType::Static>, sRefreshCallbackConstraint<EMotionType::Dynamic, EMotionType::Kinematic>, sRefreshCallbackConstraint<EMotionType::Dynamic, EMotionType::Dynamic> }
+	};
+	// This cold path only runs for actual game-side property edits. Ordinary
+	// contacts and read-only callbacks do no scanning or extra row preparation.
+	for (uint32 i = 0, count = GetNumConstraints(); i < count; ++i)
+	{
+		auto &constraint = *reinterpret_cast<ContactConstraintBase *>(mConstraints + mConstraintIdxToOffset[i]);
+		if (constraint.mBody1 == &inBody || constraint.mBody2 == &inBody)
+			table[int(constraint.mBody1->GetMotionType())][int(constraint.mBody2->GetMotionType())](constraint);
+	}
 }
 
 bool ContactConstraintManager::ClearVPhysicsFrictionState(const BodyID &inBody1ID, const SubShapeID &inSubShapeID1, const BodyID &inBody2ID, const SubShapeID &inSubShapeID2)

@@ -256,6 +256,8 @@ public:
 	/// Only for the Update owner with all jobs suspended and Update's locks held.
 	void						GetBodiesNoLock(BodyIDVector &outBodyIDs) const			{ return mBodyManager.GetBodyIDsNoLock(outBodyIDs); }
 	Constraints					GetConstraintsNoLock() const								{ return mConstraintManager.GetConstraintsNoLock(); }
+	/// Only at the synchronous Source callback gate, with all workers parked.
+	void RefreshContactCallbackBodyProperties(const Body &inBody, float inDeltaTime);
 
 	/// Get copy of the list of active bodies under protection of a lock.
 	/// @param inType The type of bodies to get

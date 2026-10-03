@@ -205,6 +205,9 @@ public:
 	///@{
 	virtual bool				IsActive() const							{ return mEnabled; }
 	virtual void				SetupVelocityConstraint(float inDeltaTime) = 0;
+	/// Called only with solver workers parked. Native equations are refreshed
+	/// immediately; legacy scratch storage can instead invalidate its revision.
+	virtual void OnCallbackBodyPropertiesChanged(float inDeltaTime) { SetupVelocityConstraint(inDeltaTime); }
 	virtual void				WarmStartVelocityConstraint(float inWarmStartImpulseRatio) = 0;
 	virtual bool				SolveVelocityConstraint(float inDeltaTime) = 0;
 	virtual bool				SolvePositionConstraint(float inDeltaTime, float inBaumgarte) = 0;

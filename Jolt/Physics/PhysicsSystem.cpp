@@ -45,6 +45,18 @@
 
 JPH_NAMESPACE_BEGIN
 
+void PhysicsSystem::RefreshContactCallbackBodyProperties(const Body &inBody, float inDeltaTime)
+{
+	mContactManager.RefreshCallbackBodyProperties(inBody);
+	for (const Ref<Constraint> &constraint : mConstraintManager.GetConstraintsNoLock())
+		if (constraint->GetType() == EConstraintType::TwoBodyConstraint && constraint->IsActive())
+		{
+			const auto *two_body = static_cast<const TwoBodyConstraint *>(constraint.GetPtr());
+			if (two_body->GetBody1() == &inBody || two_body->GetBody2() == &inBody)
+				constraint->OnCallbackBodyPropertiesChanged(inDeltaTime);
+		}
+}
+
 static bool IsLegacyTraceEnvironmentFlagSet(const char *inName)
 {
 #ifdef JPH_PLATFORM_WINDOWS
@@ -2534,6 +2546,8 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 					{
 						const auto response = [&]()
 						{
+						// PreCollision can change mass (e.g. synchronous shadow attach).
+						inv_m1 = contact_settings.mInvMassScale1 * body_mp->GetInverseMass();
 						// Calculate contact point velocity for body 2
 						Vec3 r2 = Vec3(ccd_body->mContactPointOn2 - body2_com_at_hit);
 						Vec3 v2 = body2.GetPointVelocityCOM(r2);
