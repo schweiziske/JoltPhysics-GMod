@@ -1998,12 +1998,7 @@ void PhysicsSystem::JobIntegrateVelocity(const PhysicsUpdateContext *ioContext, 
 						uint32 ccd_body_idx = ioStep->mNumCCDBodies++;
 						JPH_ASSERT(active_body_idx < ioStep->mNumActiveBodyToCCDBody);
 						ioStep->mActiveBodyToCCDBody[active_body_idx] = ccd_body_idx;
-						// The discrete position slop may be zero (Source contact policy).
-						// A sweep still needs the precision allowance used by its manifold:
-						// otherwise a negligible inward floor component can consume all
-						// tangential travel at fraction zero. Keep the shape radius bound.
-						const float ccd_allowance = max(mPhysicsSettings.mPenetrationSlop, mPhysicsSettings.mManifoldTolerance);
-						new (&ioStep->mCCDBodies[ccd_body_idx]) CCDBody(body_id, delta_pos, linear_cast_threshold_sq, min(ccd_allowance, mPhysicsSettings.mLinearCastMaxPenetration * inner_radius));
+						new (&ioStep->mCCDBodies[ccd_body_idx]) CCDBody(body_id, delta_pos, linear_cast_threshold_sq, min(mPhysicsSettings.mPenetrationSlop, mPhysicsSettings.mLinearCastMaxPenetration * inner_radius));
 
 						update_position = false;
 					}
@@ -2175,18 +2170,19 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 					// Normalize normal
 					Vec3 normal = inResult.mPenetrationAxis.Normalized();
 
-					// The hit fraction comes from the relative shape cast. Use the same
-					// relative travel for its approach test and precision allowance.
-					// A faster body can approach from behind while our own travel points
-					// away from the contact normal; own travel would discard that hit.
-					const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
-					const Vec3 relative_movement = mCCDBody.mDeltaPosition - sCalculateBodyMotion(body2, mDeltaTime);
-					float denominator = normal.Dot(relative_movement);
+					// Calculate how much we can add to the fraction to penetrate the collision point by mMaxPenetration.
+					// Note that the normal is pointing towards body 2!
+					// Let the extra distance that we can travel along delta_pos be 'dist': mMaxPenetration / dist = cos(angle between normal and delta_pos) = normal . delta_pos / |delta_pos|
+					// <=> dist = mMaxPenetration * |delta_pos| / normal . delta_pos
+					// Converting to a faction: delta_fraction = dist / |delta_pos| = mLinearCastTreshold / normal . delta_pos
+					float denominator = normal.Dot(mCCDBody.mDeltaPosition);
 					if (denominator > mCCDBody.mMaxPenetration) // Avoid dividing by zero, if extra hit fraction > 1 there's also no point in continuing
 					{
 						float fraction_plus_slop = fraction + mCCDBody.mMaxPenetration / denominator;
 						if (fraction_plus_slop < mCCDBody.mFractionPlusSlop)
 						{
+							const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
+
 							// Check if we've already accepted all hits from this body
 							if (mValidateBodyPair)
 							{
@@ -2529,10 +2525,9 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 				// We'll just move to the collision position anyway (as that's the last position we know is good), but we won't do any collision response.
 				if (ccd_body2 == nullptr || ccd_body2->mFraction >= ccd_body->mFraction)
 				{
-					// The response and game callback must use the same impact-time lever.
+					// Preserve native Jolt response lever arms; Source callbacks use the same reference poses.
 					const RVec3 body1_com_at_hit = body1.GetCenterOfMassPosition() + ccd_body->mFraction * ccd_body->mDeltaPosition;
-					const RVec3 body2_com_at_hit = body2.GetCenterOfMassPosition()
-						+ (ccd_body2 != nullptr? ccd_body->mFraction * ccd_body2->mDeltaPosition : Vec3::sZero());
+					const RVec3 body2_com_at_hit = body2.GetCenterOfMassPosition();
 					const ContactSettings &contact_settings = ccd_body->mContactSettings;
 
 					// Calculate contact point velocity for body 1
@@ -2568,7 +2563,7 @@ void PhysicsSystem::JobResolveCCDContacts(PhysicsUpdateContext *ioContext, Physi
 
 						// Solve contact constraint
 						ConcreteContactConstraintPart contact_constraint;
-						const bool applied = contact_constraint.SolveVelocityConstraint(body1, inv_m1, contact_settings.mInvInertiaScale1, r1_plus_u, body2, inv_m2, contact_settings.mInvInertiaScale2, r2, ccd_body->mContactNormal, normal_velocity_bias, 0.0f, FLT_MAX);
+						const bool applied = contact_constraint.SolveVelocityConstraint(body1, inv_m1, contact_settings.mInvInertiaScale1, r1_plus_u, body2, inv_m2, contact_settings.mInvInertiaScale2, r2, ccd_body->mContactNormal, normal_velocity_bias, -FLT_MAX, FLT_MAX);
 
 						// Apply friction
 						if (contact_settings.mCombinedFriction > 0.0f)
