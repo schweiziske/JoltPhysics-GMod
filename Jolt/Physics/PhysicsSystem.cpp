@@ -1656,7 +1656,8 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 			// Each island has one owner here, so workers write distinct elements.
 			if (mIslandDebugEnabled)
 				mDebugIslands[island_idx].mMode = DebugIslandMode::Split;
-			if (has_contacts && !has_legacy_constraints && !has_vphysics_contacts)
+			if (mPhysicsSettings.mUseHighMassRatioSolverSteps
+				&& has_contacts && !has_legacy_constraints && !has_vphysics_contacts)
 			{
 				float min_inverse_mass = FLT_MAX;
 				float max_inverse_mass = 0.0f;
@@ -1676,13 +1677,11 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					max_inverse_mass = max(max_inverse_mass, inverse_mass);
 				}
 
-				// Jolt's HeavyOnLightTest documents this exact failure mode and recommends
-				// raising velocity iterations from 10 to 30. A few extra position passes
-				// remove the residual numerical drift after the velocity solve.
-				if (min_inverse_mass < FLT_MAX && max_inverse_mass / min_inverse_mass >= 10.0f)
+				// Optional compatibility policy, independent of per-contact mass scaling.
+				if (min_inverse_mass < FLT_MAX && max_inverse_mass / min_inverse_mass >= mPhysicsSettings.mHighMassRatioThreshold)
 				{
-					steps_calculator.SetMinimumVelocitySteps(30);
-					steps_calculator.SetMinimumPositionSteps(4);
+					steps_calculator.SetMinimumVelocitySteps(mPhysicsSettings.mHighMassRatioVelocitySteps);
+					steps_calculator.SetMinimumPositionSteps(mPhysicsSettings.mHighMassRatioPositionSteps);
 				}
 			}
 			auto record_island = [=, this](bool inLargeIsland, const CalculateSolverSteps &inSteps)

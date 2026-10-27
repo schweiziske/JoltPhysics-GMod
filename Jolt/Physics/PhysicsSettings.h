@@ -109,6 +109,13 @@ struct PhysicsSettings
 	/// Number of solver position iterations to run
 	uint		mNumPositionSteps = 2;
 
+	/// Optional island-wide iteration floors for contacts with a high original mass ratio.
+	/// Disabled by default so contact mass scaling does not also force extra iterations.
+	bool		mUseHighMassRatioSolverSteps = false;
+	float		mHighMassRatioThreshold = 10.0f;
+	uint		mHighMassRatioVelocitySteps = 30;
+	uint		mHighMassRatioPositionSteps = 4;
+
 	/// Minimal velocity needed before a collision can be elastic. If the relative velocity between colliding objects
 	/// in the direction of the contact normal is lower than this, the restitution will be zero regardless of the configured
 	/// value. This lets an object settle sooner. Must be a positive number. (unit: m)

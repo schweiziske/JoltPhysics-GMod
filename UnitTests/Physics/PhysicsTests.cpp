@@ -29,6 +29,57 @@ TEST_SUITE("PhysicsTests")
 	// Gravity vector
 	const Vec3 cGravity = Vec3(0.0f, -9.81f, 0.0f);
 
+	TEST_CASE("TestHighMassRatioSolverSteps")
+	{
+		PhysicsTestContext c;
+		c.ZeroGravity();
+		PhysicsSystem *system = c.GetSystem();
+		PhysicsSettings settings = system->GetPhysicsSettings();
+		uint expected_velocity_steps = settings.mNumVelocitySteps;
+		uint expected_position_steps = settings.mNumPositionSteps;
+
+		SUBCASE("Default preserves requested iterations") { }
+		SUBCASE("Opt in restores previous floors")
+		{
+			settings.mUseHighMassRatioSolverSteps = true;
+			expected_velocity_steps = 30;
+			expected_position_steps = 4;
+		}
+		SUBCASE("Floors are configurable")
+		{
+			settings.mUseHighMassRatioSolverSteps = true;
+			settings.mHighMassRatioVelocitySteps = expected_velocity_steps = 18;
+			settings.mHighMassRatioPositionSteps = expected_position_steps = 3;
+		}
+		SUBCASE("Threshold is configurable")
+		{
+			settings.mUseHighMassRatioSolverSteps = true;
+			settings.mHighMassRatioThreshold = 100.0f;
+		}
+		SUBCASE("Floors preserve higher requested iterations")
+		{
+			settings.mUseHighMassRatioSolverSteps = true;
+			settings.mNumVelocitySteps = expected_velocity_steps = 40;
+			settings.mNumPositionSteps = expected_position_steps = 6;
+		}
+
+		system->SetPhysicsSettings(settings);
+		system->SetIslandDebugEnabled(true);
+		// The boxes have a 12:1 mass ratio and form a contact island on this step.
+		c.CreateBox(RVec3::sZero(), Quat::sIdentity(), EMotionType::Dynamic, EMotionQuality::Discrete,
+			Layers::MOVING, Vec3(0.1f, 1, 2)).SetLinearVelocity(Vec3(1, 0, 0));
+		c.CreateBox(RVec3(0.2999f, 0, 0), Quat::sIdentity(), EMotionType::Dynamic, EMotionQuality::Discrete,
+			Layers::MOVING, Vec3(0.2f, 3, 4));
+		CHECK(c.SimulateSingleStep() == EPhysicsUpdateError::None);
+		CHECK(system->GetDebugIslands().size() == 1);
+		if (system->GetDebugIslands().size() != 1)
+			return;
+		const auto &island = system->GetDebugIslands()[0];
+		CHECK_FALSE(island.mContacts.empty());
+		CHECK(island.mVelocitySteps == expected_velocity_steps);
+		CHECK(island.mPositionSteps == expected_position_steps);
+	}
+
 	// Test the test framework's helper functions
 	TEST_CASE("TestPhysicsTestContext")
 	{
