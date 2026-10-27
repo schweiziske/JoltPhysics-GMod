@@ -56,6 +56,8 @@ set(UNIT_TESTS_SRC_FILES
 	${UNIT_TESTS_ROOT}/Physics/EstimateCollisionResponseTest.cpp
 	${UNIT_TESTS_ROOT}/Physics/HeightFieldShapeTests.cpp
 	${UNIT_TESTS_ROOT}/Physics/HingeConstraintTests.cpp
+	${UNIT_TESTS_ROOT}/Physics/LegacyMotorTests.cpp
+	${UNIT_TESTS_ROOT}/Physics/LegacyContactTests.cpp
 	${UNIT_TESTS_ROOT}/Physics/MotionQualityLinearCastTests.cpp
 	${UNIT_TESTS_ROOT}/Physics/MutableCompoundShapeTests.cpp
 	${UNIT_TESTS_ROOT}/Physics/ObjectLayerPairFilterTableTests.cpp

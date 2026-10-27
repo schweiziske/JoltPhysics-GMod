@@ -3007,12 +3007,14 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 			if (point_impacted[point_index])
 			{
 				WorldContactPoint<Type1, Type2> &wcp = constraint.mContactPoints[point_index];
-				const float relative_velocity1 = wcp.mFrictionConstraint1.GetVelocityConstraintValue(
+				// Deactivated friction rows have no initialized Jacobian or bias.
+				// In particular, zero-friction impacts must seed a zero spring.
+				const float relative_velocity1 = wcp.mFrictionConstraint1.IsActive()? wcp.mFrictionConstraint1.GetVelocityConstraintValue(
 					linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, tangent1)
-					- wcp.mFrictionConstraint1.GetVelocityBias();
-				const float relative_velocity2 = wcp.mFrictionConstraint2.GetVelocityConstraintValue(
+					- wcp.mFrictionConstraint1.GetVelocityBias() : 0.0f;
+				const float relative_velocity2 = wcp.mFrictionConstraint2.IsActive()? wcp.mFrictionConstraint2.GetVelocityConstraintValue(
 					linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, tangent2)
-					- wcp.mFrictionConstraint2.GetVelocityBias();
+					- wcp.mFrictionConstraint2.GetVelocityBias() : 0.0f;
 				const float remaining_time = max(0.0f, inDeltaTime - earliest_impact_time);
 				const Vec3 displacement = (tangent1 * relative_velocity1
 					+ tangent2 * relative_velocity2) * remaining_time;

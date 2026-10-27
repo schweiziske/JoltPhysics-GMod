@@ -73,11 +73,10 @@ public:
 		if (!mReferenceInitialized)
 			InitializeAngularReference(inAngle);
 
-		float position_error = mReferencePosition - inAngle;
-		if (position_error > JPH_PI)
-			position_error -= 2.0f * JPH_PI;
-		else if (position_error < -JPH_PI)
-			position_error += 2.0f * JPH_PI;
+		// The hinge angle wraps every turn, including when restoring an older,
+		// accumulated reference. A single +/- 2 pi correction is not sufficient.
+		mReferencePosition = std::remainder(mReferencePosition, 2.0f * JPH_PI);
+		const float position_error = std::remainder(mReferencePosition - inAngle, 2.0f * JPH_PI);
 
 		return BeginStep(position_error, inDeltaTime, inTauFactor, inDampingFactor, true);
 	}
@@ -92,7 +91,10 @@ public:
 		{
 			const float factor = Clamp(std::abs(inAppliedLambda) / requested_magnitude, 0.0f, 1.0f);
 			if (mAngularStep)
+			{
 				mReferencePosition -= (1.0f - factor) * mPositionError;
+				mReferencePosition = std::remainder(mReferencePosition, 2.0f * JPH_PI);
+			}
 			else
 				mReferencePosition += (1.0f - factor) * mPositionError;
 		}
@@ -139,6 +141,10 @@ private:
 
 		mPositionError = inPositionError;
 		mReferencePosition += mDesiredVelocity * inDeltaTime;
+		// Keep angular references bounded to avoid losing precision over many turns.
+		// Linear references remain unwrapped, as required by prismatic motors.
+		if (inAngular)
+			mReferencePosition = std::remainder(mReferencePosition, 2.0f * JPH_PI);
 		mAngularStep = inAngular;
 		mStepPending = true;
 
