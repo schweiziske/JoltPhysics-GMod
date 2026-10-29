@@ -1509,6 +1509,14 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 		// wheel and would incorrectly rotate the ground friction spring with the wheel.
 		bool legacy_contact_used[MaxContactPoints] = { false };
 
+		// IVP keeps one friction mindist per pair. Once it carries support, an extra Jolt
+		// manifold point for the same sub shape pair is not a new impact and must not take the
+		// fresh-contact rescue. Player contacts keep their own per-point startup semantics.
+		bool manifold_established = false;
+		if (settings.mVPhysicsUseLegacyFriction)
+			for (const CachedContactPoint *ccp = ccp_start; ccp < ccp_end && !manifold_established; ++ccp)
+				manifold_established = ccp->mVPhysicsContactEstablished;
+
 		for (int i = 0; i < num_contact_points; ++i)
 		{
 			// Convert to world space and set positions
@@ -1576,6 +1584,10 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 				legacy_friction_normal_lambda = legacy_contact.mVPhysicsFrictionNormalLambda;
 				legacy_contact_established = legacy_contact.mVPhysicsContactEstablished;
 			}
+			// IVP_Core::grow_friction_system turns every mindist already inside friction range
+			// into a distance keeper when a core starts simulating. Those contacts never take
+			// the impact path or its rescue speed.
+			legacy_contact_established |= settings.mVPhysicsRevivedContact || manifold_established;
 
 			// Create new contact point
 			CachedContactPoint &cp = new_manifold->mContactPoints[i];
