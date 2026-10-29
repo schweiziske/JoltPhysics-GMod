@@ -104,6 +104,10 @@ public:
 
 	/// Max squared distance to consider a vertex to be the same as another vertex, used by the internal edge removal algorithm to determine if two edges are shared. (unit: meter^2)
 	float						mInternalEdgeRemovalVertexToleranceSq = cDefaultInternalEdgeRemovalVertexToleranceSq;
+
+	/// Optional distance for removing edge contacts covered by another accepted face of the same moving sub shape.
+	/// Accounts for rounded convex hulls whose adjacent faces do not share vertices. Zero disables face coverage. (unit: meter)
+	float						mInternalEdgeRemovalFaceTolerance = 0.0f;
 };
 
 JPH_NAMESPACE_END

@@ -25,6 +25,20 @@ class InternalEdgeRemovingCollector : public CollideShapeCollector
 {
 	static constexpr uint cMaxLocalDelayedResults = 32;
 	static constexpr uint cMaxLocalVoidedFeatures = 128;
+	static constexpr uint cMaxLocalSupportingFaces = 8;
+
+	static bool				sIsPointInsideFace(Vec3Arg inPoint, const CollideShapeResult::Face &inFace, Vec3Arg inNormal, float inTolerance)
+	{
+		if (Square(inNormal.Dot(inPoint - inFace[0])) > Square(inTolerance))
+			return false;
+		for (uint j = 0; j < inFace.size(); ++j)
+		{
+			Vec3 edge = inFace[(j + 1) % inFace.size()] - inFace[j];
+			if (edge.Cross(inPoint - inFace[j]).Dot(inNormal) < -inTolerance * edge.Length())
+				return false;
+		}
+		return true;
+	}
 
 	/// Check if a vertex is voided
 	inline bool				IsVoided(const SubShapeID &inSubShapeID, Vec3 inV) const
@@ -67,6 +81,13 @@ class InternalEdgeRemovingCollector : public CollideShapeCollector
 	{
 		Chain(inResult);
 		VoidFeatures(inResult);
+		if (mFaceTolerance > 0.0f && inResult.mShape2Face.size() >= 3)
+		{
+			Vec3 normal = (inResult.mShape2Face[1] - inResult.mShape2Face[0]).Cross(inResult.mShape2Face[2] - inResult.mShape2Face[0]);
+			float length = normal.Length();
+			if (length >= 1.0e-6f)
+				mFaces.push_back({ inResult.mShape2Face, normal / length, inResult.mSubShapeID1, inResult.mSubShapeID2 });
+		}
 
 	#ifdef JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
 		DebugRenderer::sInstance->DrawWirePolygon(RMat44::sTranslation(mBaseOffset), inResult.mShape2Face, Color::sGreen);
@@ -75,16 +96,46 @@ class InternalEdgeRemovingCollector : public CollideShapeCollector
 	}
 
 public:
+	/// True for an ordinary face contact, which must not be removed as a seam.
+	static bool				sIsFaceContact(const CollideShapeResult &inResult)
+	{
+		if (inResult.mShape2Face.size() < 3)
+			return false;
+		Vec3 normal = (inResult.mShape2Face[1] - inResult.mShape2Face[0]).Cross(inResult.mShape2Face[2] - inResult.mShape2Face[0]);
+		float length = normal.Length();
+		return length >= 1.0e-6f && normal.Dot(-inResult.mPenetrationAxis) > 0.999848f * length * inResult.mPenetrationAxis.Length();
+	}
+
+	/// Test an edge contact against a supporting face at the same moving shape pose.
+	/// Also used by CCD, whose tangential casts need an overlap query to find support.
+	/// The support's separating axis may itself be an edge normal: use its polygon,
+	/// not that axis, to determine whether the candidate point is covered.
+	static bool				sIsContactCoveredByFace(const CollideShapeResult &inEdge, const CollideShapeResult &inSupport, float inTolerance)
+	{
+		if (inTolerance <= 0.0f || sIsFaceContact(inEdge) || inEdge.mSubShapeID1 != inSupport.mSubShapeID1
+			|| inEdge.mSubShapeID2 == inSupport.mSubShapeID2 || inSupport.mShape2Face.size() < 3)
+			return false;
+		const auto &face = inSupport.mShape2Face;
+		Vec3 normal = (face[1] - face[0]).Cross(face[2] - face[0]);
+		float length = normal.Length();
+		if (length < 1.0e-6f)
+			return false;
+		normal /= length;
+		return sIsPointInsideFace(inEdge.mContactPointOn2, face, normal, inTolerance);
+	}
+
 	/// Constructor, configures a collector to be called with all the results that do not hit internal edges
 	explicit				InternalEdgeRemovingCollector(CollideShapeCollector &inChainedCollector,
 			float inVertexToleranceSq
 		#ifdef JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
 			, RVec3Arg inBaseOffset
 		#endif // JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
+			, float inFaceTolerance = 0.0f
 		) :
 		CollideShapeCollector(inChainedCollector),
 		mChainedCollector(inChainedCollector),
-		mVertexToleranceSq(inVertexToleranceSq)
+		mVertexToleranceSq(inVertexToleranceSq),
+		mFaceTolerance(inFaceTolerance)
 		#ifdef JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
 			, mBaseOffset(inBaseOffset)
 		#endif // JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
@@ -103,6 +154,7 @@ public:
 
 		mVoidedFeatures.clear();
 		mDelayedResults.clear();
+		mFaces.clear();
 	}
 
 	// See: CollideShapeCollector::OnBody
@@ -211,6 +263,21 @@ public:
 			// Check if this vertex/edge is voided
 			bool voided = IsVoided(r.mSubShapeID1, r.mShape2Face[best_v1_idx])
 				&& (best_v1_idx == best_v2_idx || IsVoided(r.mSubShapeID1, r.mShape2Face[best_v2_idx]));
+			// Overlapping convex hulls need not share edge vertices. A rounded edge can
+			// also put the closest point just outside the neighbouring supporting face.
+			// Only accepted face contacts on this moving leaf can cover such an edge;
+			// independent leaves and ordinary face contacts must remain untouched.
+			if (!voided)
+				for (const SupportingFace &face : mFaces)
+				{
+					if (face.mSubShapeID1 != r.mSubShapeID1 || face.mSubShapeID2 == r.mSubShapeID2)
+						continue;
+					if (sIsPointInsideFace(r.mContactPointOn2, face.mVertices, face.mNormal, mFaceTolerance))
+					{
+						voided = true;
+						break;
+					}
+				}
 
 		#ifdef JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
 			Color color = voided? Color::sRed : Color::sYellow;
@@ -232,6 +299,7 @@ public:
 		// All delayed results have been processed
 		mVoidedFeatures.clear();
 		mDelayedResults.clear();
+		mFaces.clear();
 	}
 
 	// See: CollideShapeCollector::OnBodyEnd
@@ -255,6 +323,7 @@ public:
 		#ifdef JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
 			, inBaseOffset
 		#endif // JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
+			, inCollideShapeSettings.mInternalEdgeRemovalFaceTolerance
 		);
 		CollisionDispatch::sCollideShapeVsShape(inShape1, inShape2, inScale1, inScale2, inCenterOfMassTransform1, inCenterOfMassTransform2, inSubShapeIDCreator1, inSubShapeIDCreator2, inCollideShapeSettings, wrapper, inShapeFilter);
 		wrapper.Flush();
@@ -270,10 +339,20 @@ private:
 		SubShapeID			mSubShapeID;			// Sub shape ID of the shape that is colliding against the feature (of shape 1).
 	};
 
+	struct SupportingFace
+	{
+		CollideShapeResult::Face mVertices;
+		Vec3				mNormal;
+		SubShapeID			mSubShapeID1;
+		SubShapeID			mSubShapeID2;
+	};
+
 	CollideShapeCollector &	mChainedCollector;
 	Array<Voided, STLLocalAllocator<Voided, cMaxLocalVoidedFeatures>> mVoidedFeatures;
 	Array<CollideShapeResult, STLLocalAllocator<CollideShapeResult, cMaxLocalDelayedResults>> mDelayedResults;
+	Array<SupportingFace, STLLocalAllocator<SupportingFace, cMaxLocalSupportingFaces>> mFaces;
 	float					mVertexToleranceSq;		// Max squared distance to consider a vertex to be the same as another vertex, used to determine if a feature is voided
+	float					mFaceTolerance;			// Rounding tolerance for covered contacts, zero disables face coverage
 #ifdef JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
 	RVec3					mBaseOffset; 			// Base offset for the query, used to draw the results in the right place
 #endif // JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
