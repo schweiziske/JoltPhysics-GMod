@@ -8,35 +8,14 @@
 #include <Jolt/Physics/Constraints/ConstraintManager.h>
 #include <Jolt/Physics/Constraints/TwoBodyConstraint.h>
 #include <Jolt/Physics/Constraints/LegacyBreakableState.h>
-#include <Jolt/Physics/VelocityDiagnostics.h>
 #include <Jolt/Physics/StateRecorder.h>
 #include <Jolt/ObjectStream/TypeDeclarations.h>
 #include <Jolt/Core/StreamUtils.h>
 
 #include <algorithm>
-#include <cstdio>
-#include <cstdlib>
 #include <span>
 
 JPH_NAMESPACE_BEGIN
-
-static bool IsLegacyGroupSolveTraceEnabled()
-{
-	static const bool enabled = []()
-	{
-#if defined(JPH_COMPILER_MSVC)
-		char *value = nullptr;
-		size_t length = 0;
-		const bool found = _dupenv_s(&value, &length, "VJOLT_TRACE_LEGACY_GROUP_SOLVES") == 0
-			&& value != nullptr;
-		std::free(value);
-		return found;
-#else
-		return std::getenv("VJOLT_TRACE_LEGACY_GROUP_SOLVES") != nullptr;
-#endif
-	}();
-	return enabled;
-}
 
 JPH_IMPLEMENT_SERIALIZABLE_VIRTUAL(ConstraintSettings)
 {
@@ -309,56 +288,24 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *const *inMember
 			if (entry.mStorage != nullptr && !entry.mConstraint->mLegacySolverStoragePrepared)
 				entry.mConstraint->DestroyLegacySolverStorage(entry.mStorage);
 	};
-	const bool traceGroupSolves = IsLegacyGroupSolveTraceEnabled();
-	uint32 solveOrdinal = 0;
-	if (traceGroupSolves)
-		std::fprintf(stderr, "LEGACY_GROUP_BEGIN group=%p island_members=%zu additional=%d\n",
-			static_cast<void *>(this), active_entries.size(), mAdditionalIterations);
-	auto solveConstraint = [&](const SolverEntry &entry, float tauFactor, float dampingFactor,
-		const char *phase, int64 iteration, bool setup)
+	auto solveConstraint = [&](const SolverEntry &entry, float tauFactor, float dampingFactor, bool setup)
 	{
 		if (groupBroken)
 			return;
-		++solveOrdinal;
 		Constraint *constraint = entry.mConstraint;
 		const bool check_break = constraint->HasLegacyBreakLimits();
-		const bool capture_body_state = traceGroupSolves || check_break || VelocityDiagnostics::Enabled();
-		const TwoBodyConstraint *two_body = capture_body_state
+		const TwoBodyConstraint *two_body = check_break
 			&& constraint->GetType() == EConstraintType::TwoBodyConstraint?
 				static_cast<const TwoBodyConstraint *>(constraint) : nullptr;
 		const Vec3 linear1 = two_body? two_body->GetBody1()->GetLinearVelocity() : Vec3::sZero();
 		const Vec3 angular1 = two_body? two_body->GetBody1()->GetAngularVelocity() : Vec3::sZero();
 		const Vec3 linear2 = two_body? two_body->GetBody2()->GetLinearVelocity() : Vec3::sZero();
 		const Vec3 angular2 = two_body? two_body->GetBody2()->GetAngularVelocity() : Vec3::sZero();
-		const auto solve = [&]() {
-			return setup
-				? constraint->SetupAndSolveLegacyVelocityConstraint(
-					entry.mStorage, inDeltaTime, tauFactor, dampingFactor)
-				: constraint->StepLegacyVelocityConstraint(
-					entry.mStorage, inDeltaTime, tauFactor, dampingFactor);
-		};
-		appliedImpulse |= two_body && VelocityDiagnostics::Enabled()
-			? VelocityDiagnostics::Observe(setup? "havana-setup" : "havana-step",
-				uint32(entry.mConstraintIndex), *two_body->GetBody1(), *two_body->GetBody2(), solve,
-				uint32(constraint->GetSubType()))
-			: solve();
-		if (traceGroupSolves && two_body)
-		{
-			const Vec3 postLinear1 = two_body->GetBody1()->GetLinearVelocity();
-			const Vec3 postAngular1 = two_body->GetBody1()->GetAngularVelocity();
-			const Vec3 postLinear2 = two_body->GetBody2()->GetLinearVelocity();
-			const Vec3 postAngular2 = two_body->GetBody2()->GetAngularVelocity();
-			std::fprintf(stderr,
-				"LEGACY_GROUP_SOLVE group=%p ordinal=%u phase=%s iteration=%lld index=%zu subtype=%u b1=%u pre_v=(%.9g,%.9g,%.9g) pre_w=(%.9g,%.9g,%.9g) post_v=(%.9g,%.9g,%.9g) post_w=(%.9g,%.9g,%.9g) b2=%u pre_v=(%.9g,%.9g,%.9g) pre_w=(%.9g,%.9g,%.9g) post_v=(%.9g,%.9g,%.9g) post_w=(%.9g,%.9g,%.9g)\n",
-				static_cast<void *>(this), solveOrdinal, phase, static_cast<long long>(iteration),
-				entry.mConstraintIndex, uint(constraint->GetSubType()),
-				two_body->GetBody1()->GetID().GetIndexAndSequenceNumber(),
-				linear1.GetX(), linear1.GetY(), linear1.GetZ(), angular1.GetX(), angular1.GetY(), angular1.GetZ(),
-				postLinear1.GetX(), postLinear1.GetY(), postLinear1.GetZ(), postAngular1.GetX(), postAngular1.GetY(), postAngular1.GetZ(),
-				two_body->GetBody2()->GetID().GetIndexAndSequenceNumber(),
-				linear2.GetX(), linear2.GetY(), linear2.GetZ(), angular2.GetX(), angular2.GetY(), angular2.GetZ(),
-				postLinear2.GetX(), postLinear2.GetY(), postLinear2.GetZ(), postAngular2.GetX(), postAngular2.GetY(), postAngular2.GetZ());
-		}
+		appliedImpulse |= setup
+			? constraint->SetupAndSolveLegacyVelocityConstraint(
+				entry.mStorage, inDeltaTime, tauFactor, dampingFactor)
+			: constraint->StepLegacyVelocityConstraint(
+				entry.mStorage, inDeltaTime, tauFactor, dampingFactor);
 		if (check_break && constraint->CheckLegacyBreakAfterSolve(
 			linear1, angular1, linear2, angular2, mRollbackOnBreak)
 			&& mRollbackOnBreak)
@@ -367,15 +314,15 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *const *inMember
 			groupBroken = true;
 		}
 	};
-	auto solveForward = [&](float tauFactor, float dampingFactor, int64 iteration)
+	auto solveForward = [&](float tauFactor, float dampingFactor)
 	{
 		for (const SolverEntry &entry : active_entries)
-			solveConstraint(entry, tauFactor, dampingFactor, "forward", iteration, false);
+			solveConstraint(entry, tauFactor, dampingFactor, false);
 	};
-	auto solveReverse = [&](float tauFactor, float dampingFactor, int64 iteration)
+	auto solveReverse = [&](float tauFactor, float dampingFactor)
 	{
 		for (auto entry = active_entries.rbegin(); entry != active_entries.rend(); ++entry)
-			solveConstraint(*entry, tauFactor, dampingFactor, "reverse", iteration, false);
+			solveConstraint(*entry, tauFactor, dampingFactor, false);
 	};
 	auto setupAndSolveForward = [&](float tauFactor, float dampingFactor)
 	{
@@ -386,7 +333,7 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *const *inMember
 		{
 			if (groupBroken)
 				break;
-			solveConstraint(entry, tauFactor, dampingFactor, "setup", -1, true);
+			solveConstraint(entry, tauFactor, dampingFactor, true);
 		}
 	};
 
@@ -406,12 +353,9 @@ bool LegacyConstraintGroup::SolveVelocityConstraints(Constraint *const *inMember
 			&& tau_factors[iteration] != 0.0f && !groupBroken;
 		++iteration)
 	{
-		solveReverse(tau_factors[iteration], damping_factors[iteration], iteration);
-		solveForward(tau_factors[iteration], damping_factors[iteration], iteration);
+		solveReverse(tau_factors[iteration], damping_factors[iteration]);
+		solveForward(tau_factors[iteration], damping_factors[iteration]);
 	}
-	if (traceGroupSolves)
-		std::fprintf(stderr, "LEGACY_GROUP_END group=%p solves=%u broken=%d\n",
-			static_cast<void *>(this), solveOrdinal, groupBroken ? 1 : 0);
 	destroy_solver_storage();
 
 	return appliedImpulse;

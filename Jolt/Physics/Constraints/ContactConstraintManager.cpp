@@ -10,14 +10,11 @@
 #include <Jolt/Physics/PhysicsUpdateContext.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
-#include <Jolt/Physics/VelocityDiagnostics.h>
 #include <Jolt/Physics/IslandBuilder.h>
 #include <Jolt/Physics/DeterminismLog.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Core/QuickSort.h>
 #include <Jolt/Core/Prefetch.h>
-#include <cstdio>
-#include <cstdlib>
 #ifdef JPH_DEBUG_RENDERER
 	#include <Jolt/Renderer/DebugRenderer.h>
 #endif // JPH_DEBUG_RENDERER
@@ -25,30 +22,6 @@
 JPH_NAMESPACE_BEGIN
 
 using namespace literals;
-
-static bool IsPlayerSupportSpreadPenetrationEnabled()
-{
-	static const bool enabled = std::getenv("VJOLT_TEST_PLAYER_SUPPORT_SPREAD_PENETRATION") != nullptr;
-	return enabled;
-}
-
-static bool IsPlayerSupportCacheTraceEnabled()
-{
-	static const bool enabled = std::getenv("VJOLT_TRACE_PLAYER_SUPPORT_CACHE_ACTIVE") != nullptr;
-	return enabled;
-}
-
-static bool IsVPhysicsImpactTraceEnabled()
-{
-	static const bool enabled = std::getenv("VJOLT_TRACE_VPHYSICS_IMPACT") != nullptr;
-	return enabled;
-}
-
-static bool IsLegacyFrictionTraceEnabled()
-{
-	static const bool enabled = std::getenv("VJOLT_TRACE_LEGACY_FRICTION") != nullptr;
-	return enabled;
-}
 
 #ifdef JPH_DEBUG_RENDERER
 bool ContactConstraintManager::sDrawContactPoint = false;
@@ -200,10 +173,7 @@ JPH_INLINE void ContactConstraintManager::WorldContactPoint<Type1, Type2>::Calcu
 			? 0.0f : 0.5f * inContactSeparationTarget;
 		if (contact_gap <= collision_tolerance)
 		{
-			const float startup_rescue_penetration =
-				inSettings.mVPhysicsPlayerSupportStartupRescuePenetration >= 0.0f
-					? inSettings.mVPhysicsPlayerSupportStartupRescuePenetration
-					: inSettings.mVPhysicsPlayerSupportStartupPenetration;
+			const float startup_rescue_penetration = inSettings.mVPhysicsPlayerSupportStartupPenetration;
 			const float raw_rescue_penetration = inSettings.mVPhysicsPlayerSupportStartupContact
 				&& startup_rescue_penetration >= 0.0f
 				? startup_rescue_penetration
@@ -937,10 +907,7 @@ JPH_INLINE ContactConstraintManager::ContactConstraint<Type1, Type2> *ContactCon
 	constraint->mPlayerSupportStartup = inSettings.mVPhysicsPlayerSupportStartupContact;
 	constraint->mUseNativeContactTuning = inSettings.mVPhysicsUseNativeContactTuning;
 	constraint->mVPhysicsNormalImpulseReportScale = inSettings.mVPhysicsNormalImpulseReportScale;
-	constraint->mPlayerSupportStartupPenetration =
-		inSettings.mVPhysicsPlayerSupportStartupRescuePenetration >= 0.0f
-			? inSettings.mVPhysicsPlayerSupportStartupRescuePenetration
-			: inSettings.mVPhysicsPlayerSupportStartupPenetration;
+	constraint->mPlayerSupportStartupPenetration = inSettings.mVPhysicsPlayerSupportStartupPenetration;
 	if (constraint->mPlayerSupportStartup)
 	{
 		constraint->mPlayerSupportStartupInitialNormalVelocity1 = inBody1.IsDynamic()
@@ -1056,16 +1023,6 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 				output_cm->mVPhysicsPlayerSupportStartupPenetration =
 					settings.mVPhysicsPlayerSupportStartupPenetration;
 			}
-			else if (settings.mVPhysicsPlayerSupportStartupContact
-				&& IsPlayerSupportSpreadPenetrationEnabled())
-			{
-				const float live_penetration = max(0.0f, penetration_depth);
-				const float remaining_feature_count = max(1.0f, float(output_cm->mNumContactPoints - 1));
-				settings.mVPhysicsPlayerSupportStartupRescuePenetration =
-					settings.mVPhysicsPlayerSupportStartupPenetration + max(0.0f,
-					live_penetration - settings.mVPhysicsPlayerSupportStartupPenetration)
-					/ remaining_feature_count;
-			}
 
 			// Notify callback
 			mContactListener->OnContactPersisted(inBody1, inBody2, manifold, settings);
@@ -1139,13 +1096,6 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 					|| ccp.mVPhysicsFrictionNormalLambda > 0.0f;
 				const bool has_established_contact = has_cached_support
 					|| ccp.mVPhysicsContactEstablished;
-				if (IsPlayerSupportCacheTraceEnabled())
-					std::fprintf(stderr,
-						"PLAYER_SUPPORT_CACHE cached b1=%u b2=%u point=%u lambda=%.9g legacy=%.9g established=%d startup=%d impacting=%d\n",
-						inBody1.GetID().GetIndexAndSequenceNumber(), inBody2.GetID().GetIndexAndSequenceNumber(),
-						i, wcp.mNonPenetrationConstraint.GetTotalLambda(), ccp.mVPhysicsFrictionNormalLambda,
-						int(ccp.mVPhysicsContactEstablished), int(settings.mVPhysicsPlayerSupportStartupContact),
-						int(settings.mVPhysicsImpactingContact));
 				constraint->mContactHasCachedSupport |= has_cached_support;
 				constraint->mResponseEstablished |= has_established_contact;
 				bool allow_contact_rescue = !has_established_contact;
@@ -1395,16 +1345,6 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 			settings.mVPhysicsPlayerSupportStartupPenetration =
 				max(0.0f, inManifold.mPenetrationDepth);
 		}
-		else if (settings.mVPhysicsPlayerSupportStartupContact
-			&& IsPlayerSupportSpreadPenetrationEnabled())
-		{
-			const float live_penetration = max(0.0f, inManifold.mPenetrationDepth);
-			const float remaining_feature_count = max(1.0f, float(inManifold.mRelativeContactPointsOn1.size() - 1));
-			settings.mVPhysicsPlayerSupportStartupRescuePenetration =
-				settings.mVPhysicsPlayerSupportStartupPenetration + max(0.0f,
-				live_penetration - settings.mVPhysicsPlayerSupportStartupPenetration)
-				/ remaining_feature_count;
-		}
 		// Call point persisted listener
 		if (mContactListener != nullptr)
 			mContactListener->OnContactPersisted(inBody1, inBody2, inManifold, settings);
@@ -1603,13 +1543,6 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 				|| legacy_friction_normal_lambda > 0.0f;
 			const bool has_established_contact = has_cached_support
 				|| legacy_contact_established;
-			if (IsPlayerSupportCacheTraceEnabled())
-				std::fprintf(stderr,
-					"PLAYER_SUPPORT_CACHE added b1=%u b2=%u point=%d lambda=%.9g legacy=%.9g established=%d startup=%d impacting=%d\n",
-					inBody1.GetID().GetIndexAndSequenceNumber(), inBody2.GetID().GetIndexAndSequenceNumber(),
-					i, wcp.mNonPenetrationConstraint.GetTotalLambda(), legacy_friction_normal_lambda,
-					int(legacy_contact_established), int(settings.mVPhysicsPlayerSupportStartupContact),
-					int(settings.mVPhysicsImpactingContact));
 			constraint->mContactHasCachedSupport |= has_cached_support;
 			constraint->mResponseEstablished |= has_established_contact;
 			bool allow_contact_rescue = !has_established_contact;
@@ -2181,9 +2114,7 @@ void ContactConstraintManager::TemplatedWarmStartVelocityConstraints(const uint3
 		Body &body2 = *constraint.mBody2;
 		MotionProperties *motion_properties1 = body1.GetMotionPropertiesUnchecked();
 		MotionProperties *motion_properties2 = body2.GetMotionPropertiesUnchecked();
-		VelocityDiagnostics::Observe("contact-warmstart", 0, body1, body2, [&]() {
-			table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](constraint, motion_properties1, motion_properties2, inWarmStartImpulseRatio);
-		});
+		table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](constraint, motion_properties1, motion_properties2, inWarmStartImpulseRatio);
 
 		// Call callbacks
 		if (body1.IsDynamic())
@@ -2473,12 +2404,6 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 	ContactConstraint<Type1, Type2> &constraint = static_cast<ContactConstraint<Type1, Type2> &>(ioConstraint);
 	if (!constraint.mUseVPhysicsSolver)
 		return false;
-	const bool trace_impact = IsVPhysicsImpactTraceEnabled();
-	if (trace_impact)
-		std::fprintf(stderr, "VPHYSICS_IMPACT_ROUTE b1=%u b2=%u active=%d points=%u\n",
-			constraint.mBody1->GetID().GetIndexAndSequenceNumber(),
-			constraint.mBody2->GetID().GetIndexAndSequenceNumber(),
-			int(constraint.mContactImpacting), constraint.mNumContactPoints);
 	if (!constraint.mContactImpacting)
 		return false;
 
@@ -2525,13 +2450,6 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 		if (applied)
 			sSetVelocities<Type1, Type2>(ioMotionProperties1, ioMotionProperties2,
 				linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2);
-		if (trace_impact)
-			std::fprintf(stderr,
-				"VPHYSICS_INTERPENETRATION_RESCUE b1=%u b2=%u dir=(%.9g,%.9g,%.9g) speed=%.9g impulse=%.9g\n",
-				constraint.mBody1->GetID().GetIndexAndSequenceNumber(),
-				constraint.mBody2->GetID().GetIndexAndSequenceNumber(),
-				rescue_direction.GetX(), rescue_direction.GetY(), rescue_direction.GetZ(),
-				relative_speed_change, rescue_impulse);
 		return applied;
 	}
 
@@ -2719,28 +2637,10 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 	{
 		++ioStats.mImpactCount;
 		++ioStats.mSystemImpactCount;
-		WorldContactPoint<Type1, Type2> &wcp = constraint.mContactPoints[inPointIndex];
 		const Vec3 &r1 = event_r1[inPointIndex];
 		const Vec3 &r2 = event_r2[inPointIndex];
 		const float initial_closing_speed = -get_relative_velocity(inPointIndex).Dot(normal);
 		const float gap = event_gap[inPointIndex];
-		if (trace_impact)
-		{
-			const Vec3 relative_velocity = get_relative_velocity(inPointIndex);
-			std::fprintf(stderr,
-				"VPHYSICS_IMPACT_INPUT point=%u system=%u normal=(%.9g,%.9g,%.9g) rel=(%.9g,%.9g,%.9g) closing=%.9g bias=%.9g "
-				"v1=(%.9g,%.9g,%.9g) w1=(%.9g,%.9g,%.9g) r1=(%.9g,%.9g,%.9g) "
-				"v2=(%.9g,%.9g,%.9g) w2=(%.9g,%.9g,%.9g) r2=(%.9g,%.9g,%.9g)\n",
-				inPointIndex, inImpactsWhileSystem, normal.GetX(), normal.GetY(), normal.GetZ(),
-				relative_velocity.GetX(), relative_velocity.GetY(), relative_velocity.GetZ(),
-				initial_closing_speed, wcp.mNonPenetrationConstraint.GetVelocityBias(),
-				linear_velocity1.GetX(), linear_velocity1.GetY(), linear_velocity1.GetZ(),
-				angular_velocity1.GetX(), angular_velocity1.GetY(), angular_velocity1.GetZ(),
-				r1.GetX(), r1.GetY(), r1.GetZ(),
-				linear_velocity2.GetX(), linear_velocity2.GetY(), linear_velocity2.GetZ(),
-				angular_velocity2.GetX(), angular_velocity2.GetY(), angular_velocity2.GetZ(),
-				r2.GetX(), r2.GetY(), r2.GetZ());
-		}
 
 		const Vec3 r1_cross_normal = r1.Cross(normal);
 		const Vec3 r2_cross_normal = r2.Cross(normal);
@@ -2762,9 +2662,6 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 		// changes direction; replacing it with a one-shot Coulomb projection changes wheel spin.
 		const float push_step = initial_closing_speed > cImpactEpsilon
 			? 0.2f * initial_closing_speed / inverse_virtual_mass : 0.0f;
-		if (trace_impact)
-			std::fprintf(stderr, "VPHYSICS_IMPACT_MASS point=%u inverse_mass=%.9g push_step=%.9g\n",
-				inPointIndex, inverse_virtual_mass, push_step);
 		Vec3 point_push = Vec3::sZero();
 		float virtual_speed = initial_closing_speed;
 		int push_count = 0;
@@ -2905,11 +2802,6 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 				committed_linear_velocity2 = linear_velocity2;
 				committed_angular_velocity2 = angular_velocity2;
 			}
-			if (trace_impact)
-				std::fprintf(stderr,
-					"VPHYSICS_IMPACT_DELAY point=%u candidate=%u delayed=%d closing=%.9g vm1=%.9g vm2=%.9g\n",
-					inPointIndex, delay_body1 ? 1u : 2u, int(delay_selected_body),
-					delay_closing_speed, virtual_mass1, virtual_mass2);
 		}
 		else
 		{
@@ -2917,15 +2809,6 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 			committed_angular_velocity1 = angular_velocity1;
 			committed_linear_velocity2 = linear_velocity2;
 			committed_angular_velocity2 = angular_velocity2;
-		}
-		if (trace_impact)
-		{
-			const Vec3 relative_velocity = get_relative_velocity(inPointIndex);
-			std::fprintf(stderr,
-				"VPHYSICS_IMPACT_OUTPUT point=%u pushes=%d total=(%.9g,%.9g,%.9g) rel=(%.9g,%.9g,%.9g) gap=%.9g rescue=%.9g target=%.9g\n",
-				inPointIndex, push_count, point_push.GetX(), point_push.GetY(),
-				point_push.GetZ(), relative_velocity.GetX(), relative_velocity.GetY(),
-				relative_velocity.GetZ(), gap, rescue_speed_addon, desired_opening_speed);
 		}
 		return !point_push.IsNearZero();
 	};
@@ -2961,22 +2844,10 @@ bool ContactConstraintManager::sSolveVPhysicsImpactConstraint(ContactConstraintB
 			break;
 		++impacts_while_system[worst_point];
 		++consumed_system_impacts;
-		if (trace_impact)
-			std::fprintf(stderr,
-				"VPHYSICS_IMPACT_SELECT iteration=%u point=%u predicted=%.9g count=%u\n",
-				consumed_system_impacts - 1, worst_point, smallest_predicted_distance,
-				impacts_while_system[worst_point]);
 		if (!solve_impact_point(worst_point, impacts_while_system[worst_point]))
 			break;
 	}
 	ioRemainingSystemImpacts -= consumed_system_impacts;
-	if (trace_impact && consumed_system_impacts == manifold_impact_budget
-		&& manifold_impact_budget > 0)
-		std::fprintf(stderr,
-			"VPHYSICS_IMPACT_BUDGET b1=%u b2=%u consumed=%u remaining=%u points=%u\n",
-			constraint.mBody1->GetID().GetIndexAndSequenceNumber(),
-			constraint.mBody2->GetID().GetIndexAndSequenceNumber(),
-			consumed_system_impacts, ioRemainingSystemImpacts, constraint.mNumContactPoints);
 
 	// Jolt's lambda sign is the impulse applied to body 2; IVP accumulated the opposite push on
 	// body 1. Publish the complete per-mindist sums only after the impact system has converged.
@@ -3071,7 +2942,6 @@ bool ContactConstraintManager::sSolveLegacyFrictionConstraint(ContactConstraintB
 	Mat44 inv_i2 = Mat44::sZero();
 	if constexpr (Type2 == EMotionType::Dynamic)
 		inv_i2 = constraint.mInvInertiaScale2 * constraint.mBody2->GetInverseInertia();
-	const bool trace_friction = IsLegacyFrictionTraceEnabled();
 
 	Vec3 linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2;
 	sGetVelocities<Type1, Type2>(ioMotionProperties1, ioMotionProperties2, linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2);
@@ -3086,10 +2956,6 @@ bool ContactConstraintManager::sSolveLegacyFrictionConstraint(ContactConstraintB
 		Vec3 displacement = Vec3::sLoadFloat3Unsafe(wcp.mContactPoint->mVPhysicsFrictionDisplacement);
 		// Match IVP's contact replacement path: preserve the old world-space friction
 		// vector, then project it into the current contact plane before integrating slip.
-		if (VelocityDiagnostics::Enabled())
-			VelocityDiagnostics::Check("friction-cache", i, *constraint.mBody1, *constraint.mBody2,
-				VelocityDiagnostics::State(*constraint.mBody1, *constraint.mBody2), displacement,
-				wcp.mContactPoint->mVPhysicsFrictionNormalLambda, "input");
 		displacement -= ws_normal * displacement.Dot(ws_normal);
 		const float relative_velocity1 = wcp.mFrictionConstraint1.GetVelocityConstraintValue(
 			linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, t1)
@@ -3154,14 +3020,6 @@ bool ContactConstraintManager::sSolveLegacyFrictionConstraint(ContactConstraintB
 			lambda1 = k00 > 0.0f ? rhs1 / k00 : 0.0f;
 			lambda2 = k11 > 0.0f ? rhs2 / k11 : 0.0f;
 		}
-		if (trace_friction)
-			std::fprintf(stderr,
-				"VPHYSICS_FRICTION_INPUT b1=%u b2=%u point=%u rel=(%.9g,%.9g) disp=(%.9g,%.9g,%.9g) rhs=(%.9g,%.9g) k=(%.9g,%.9g,%.9g) lambda=(%.9g,%.9g) max=%.9g\n",
-				constraint.mBody1->GetID().GetIndexAndSequenceNumber(),
-				constraint.mBody2->GetID().GetIndexAndSequenceNumber(), i,
-				relative_velocity1, relative_velocity2,
-				displacement.GetX(), displacement.GetY(), displacement.GetZ(), rhs1, rhs2,
-				k00, k01, k11, lambda1, lambda2, max_friction_lambda);
 		const float total_lambda_sq = Square(lambda1) + Square(lambda2);
 		if (total_lambda_sq > Square(max_friction_lambda) && total_lambda_sq > 0.0f)
 		{
@@ -3178,18 +3036,6 @@ bool ContactConstraintManager::sSolveLegacyFrictionConstraint(ContactConstraintB
 			linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2,
 			constraint.mInvMass1, constraint.mInvMass2, t2, lambda2))
 			any_impulse_applied = true;
-		if (trace_friction)
-		{
-			const float output1 = wcp.mFrictionConstraint1.GetVelocityConstraintValue(
-				linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, t1)
-				- wcp.mFrictionConstraint1.GetVelocityBias();
-			const float output2 = wcp.mFrictionConstraint2.GetVelocityConstraintValue(
-				linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, t2)
-				- wcp.mFrictionConstraint2.GetVelocityBias();
-			std::fprintf(stderr, "VPHYSICS_FRICTION_OUTPUT b1=%u b2=%u point=%u rel=(%.9g,%.9g)\n",
-				constraint.mBody1->GetID().GetIndexAndSequenceNumber(),
-				constraint.mBody2->GetID().GetIndexAndSequenceNumber(), i, output1, output2);
-		}
 	}
 
 	if (any_impulse_applied)
@@ -3232,9 +3078,6 @@ void ContactConstraintManager::sIntegrateLegacyFrictionState(ContactConstraintBa
 			linear_velocity1, angular_velocity1, linear_velocity2, angular_velocity2, t2)
 			- wcp.mFrictionConstraint2.GetVelocityBias() : 0.0f;
 		displacement += (t1 * relative_velocity1 + t2 * relative_velocity2) * inDeltaTime;
-		if (VelocityDiagnostics::Enabled())
-			VelocityDiagnostics::Check("friction-integrate", i, *constraint.mBody1, *constraint.mBody2,
-				VelocityDiagnostics::State(*constraint.mBody1, *constraint.mBody2), displacement);
 		displacement.StoreFloat3(&wcp.mContactPoint->mVPhysicsFrictionDisplacement);
 	}
 }
@@ -3297,9 +3140,7 @@ bool ContactConstraintManager::TemplatedSolveVelocityConstraints(const uint32 *i
 		// Dispatch to the correct templated form
 		Body &body1 = *constraint.mBody1;
 		Body &body2 = *constraint.mBody2;
-		any_impulse_applied |= VelocityDiagnostics::Observe(PersistentOnly? "legacy-normal" : "native-contact", 0, body1, body2, [&]() {
-			return table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](*this, constraint, body1.GetMotionPropertiesUnchecked(), body2.GetMotionPropertiesUnchecked(), batch_tail ? &batch_tail : nullptr);
-		});
+		any_impulse_applied |= table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](*this, constraint, body1.GetMotionPropertiesUnchecked(), body2.GetMotionPropertiesUnchecked(), batch_tail ? &batch_tail : nullptr);
 		if (batch_executed)
 			break;
 	}
@@ -3343,12 +3184,10 @@ bool ContactConstraintManager::SolveVPhysicsImpactConstraints(const uint32 *inCo
 		ContactConstraintBase &constraint = *reinterpret_cast<ContactConstraintBase *>(mConstraints + *offset);
 		Body &body1 = *constraint.mBody1;
 		Body &body2 = *constraint.mBody2;
-		any_impulse_applied |= VelocityDiagnostics::Observe("legacy-impact", 0, body1, body2, [&]() {
-			return table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](
-				*this, constraint, body1.GetMotionPropertiesUnchecked(), body2.GetMotionPropertiesUnchecked(),
-				inDeltaTime, mPhysicsSettings.mContactSeparationTarget,
-				interpenetration_rescue_speed, remaining_system_impacts, stats);
-		});
+		any_impulse_applied |= table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](
+			*this, constraint, body1.GetMotionPropertiesUnchecked(), body2.GetMotionPropertiesUnchecked(),
+			inDeltaTime, mPhysicsSettings.mContactSeparationTarget,
+			interpenetration_rescue_speed, remaining_system_impacts, stats);
 	}
 	if (mContactListener != nullptr && !stats.IsEmpty())
 		mContactListener->OnVPhysicsSolverStats(stats);
@@ -3382,10 +3221,8 @@ bool ContactConstraintManager::SolveLegacyFrictionConstraints(const uint32 *inCo
 		ContactConstraintBase &constraint = *reinterpret_cast<ContactConstraintBase *>(mConstraints + *offset);
 		Body &body1 = *constraint.mBody1;
 		Body &body2 = *constraint.mBody2;
-		any_impulse_applied |= VelocityDiagnostics::Observe("legacy-friction", 0, body1, body2, [&]() {
-			return table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](
-				constraint, body1.GetMotionPropertiesUnchecked(), body2.GetMotionPropertiesUnchecked(), inDeltaTime);
-		});
+		any_impulse_applied |= table[(int)body1.GetMotionType()][(int)body2.GetMotionType()](
+			constraint, body1.GetMotionPropertiesUnchecked(), body2.GetMotionPropertiesUnchecked(), inDeltaTime);
 	}
 	return any_impulse_applied;
 }

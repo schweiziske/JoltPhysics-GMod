@@ -35,11 +35,6 @@
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Core/QuickSort.h>
 #include <Jolt/Core/ScopeExit.h>
-#ifdef JPH_PLATFORM_WINDOWS
-	#include <Jolt/Core/IncludeWindows.h>
-#endif
-#include <cstdio>
-#include <cstdlib>
 #ifdef JPH_DEBUG_RENDERER
 	#include <Jolt/Renderer/DebugRenderer.h>
 #endif // JPH_DEBUG_RENDERER
@@ -56,27 +51,6 @@ void PhysicsSystem::RefreshContactCallbackBodyProperties(const Body &inBody, flo
 			if (two_body->GetBody1() == &inBody || two_body->GetBody2() == &inBody)
 				constraint->OnCallbackBodyPropertiesChanged(inDeltaTime);
 		}
-}
-
-static bool IsLegacyTraceEnvironmentFlagSet(const char *inName)
-{
-#ifdef JPH_PLATFORM_WINDOWS
-	return GetEnvironmentVariableA(inName, nullptr, 0) != 0;
-#else
-	return std::getenv(inName) != nullptr;
-#endif
-}
-
-static bool IsLegacyStageTraceEnabled()
-{
-	static const bool enabled = IsLegacyTraceEnvironmentFlagSet("VJOLT_TRACE_LEGACY_STAGES");
-	return enabled;
-}
-
-static bool IsLegacyLargeOnlyTraceEnabled()
-{
-	static const bool enabled = IsLegacyTraceEnvironmentFlagSet("VJOLT_TRACE_LEGACY_LARGE_ONLY");
-	return enabled;
 }
 
 #ifdef JPH_DEBUG_RENDERER
@@ -1780,40 +1754,9 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 
 				// Solve velocity constraints
 				const uint num_velocity_steps = steps_calculator.GetNumVelocitySteps();
-				const bool trace_legacy_stages = has_legacy_constraints
-					&& IsLegacyStageTraceEnabled();
-				auto trace_legacy_bodies = [=, this](const char *inStage)
-				{
-					if (!trace_legacy_stages)
-						return;
-					for (const uint32 *constraint_idx = constraints_begin; constraint_idx < constraints_end; ++constraint_idx)
-					{
-						Constraint *constraint = active_constraints[*constraint_idx];
-						if (constraint->GetLegacyConstraintGroup() == nullptr
-							|| constraint->GetType() != EConstraintType::TwoBodyConstraint)
-							continue;
-						const TwoBodyConstraint *two_body = static_cast<const TwoBodyConstraint *>(constraint);
-						const Body *body1 = two_body->GetBody1();
-						const Body *body2 = two_body->GetBody2();
-						const Vec3 v1 = body1->GetLinearVelocity();
-						const Vec3 w1 = body1->GetAngularVelocity();
-						const Vec3 v2 = body2->GetLinearVelocity();
-						const Vec3 w2 = body2->GetAngularVelocity();
-						if (IsLegacyLargeOnlyTraceEnabled()
-							&& w1.LengthSq() < 1.0f && w2.LengthSq() < 1.0f)
-							continue;
-						std::fprintf(stderr,
-							"LEGACY_STAGE %s subtype=%u b1=%u v=(%.9g,%.9g,%.9g) w=(%.9g,%.9g,%.9g) b2=%u v=(%.9g,%.9g,%.9g) w=(%.9g,%.9g,%.9g)\n",
-							inStage, uint(constraint->GetSubType()), body1->GetID().GetIndexAndSequenceNumber(), v1.GetX(), v1.GetY(), v1.GetZ(),
-							w1.GetX(), w1.GetY(), w1.GetZ(), body2->GetID().GetIndexAndSequenceNumber(),
-							v2.GetX(), v2.GetY(), v2.GetZ(), w2.GetX(), w2.GetY(), w2.GetZ());
-					}
-				};
 				auto finish_velocity = [=, this](bool legacy_applied, bool first_applied) mutable
 				{
 					bool is_large_island = false;
-					if (has_legacy_constraints && num_velocity_steps > 0)
-						trace_legacy_bodies("after_havana");
 					if (defer_contact_warm_start)
 					{
 						DummyCalculateSolverSteps warm_start_steps;
@@ -1829,9 +1772,7 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 							if (velocity_step == 0)
 							{
 								applied_impulse |= mContactManager.SolveVPhysicsImpactConstraints(contacts_begin, contacts_end, delta_time);
-								trace_legacy_bodies("after_contact_impact");
 								applied_impulse |= mContactManager.SolvePersistentNonPenetrationConstraints(contacts_begin, contacts_end);
-								trace_legacy_bodies("after_normal");
 							}
 						}
 						// Native contacts retain their ordinary iterative solve even in a mixed
@@ -1885,13 +1826,11 @@ void PhysicsSystem::JobSolveVelocityConstraints(PhysicsUpdateContext *ioContext,
 					first_applied = ConstraintManager::sSolveVelocityConstraints(active_constraints, constraints_begin, constraints_end, delta_time);
 					if (has_legacy_friction || has_vphysics_contacts)
 					{
-						trace_legacy_bodies("pre");
 						// IVP evaluates each contact controller independently. A fresh impact on one
 						// wheel must not disable the already-established distance keepers on the other
 						// wheels in the same constraint island.
 						mContactManager.ResetImpactingLegacyFrictionState(contacts_begin, contacts_end);
 						first_applied |= mContactManager.SolveLegacyFrictionConstraints(contacts_begin, contacts_end, delta_time);
-						trace_legacy_bodies("after_friction");
 					}
 				}
 				if (has_legacy_constraints && num_velocity_steps > 0)
