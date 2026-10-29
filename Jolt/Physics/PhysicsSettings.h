@@ -102,10 +102,6 @@ struct PhysicsSettings
 	/// Max squared distance to consider a vertex to be the same as another vertex, used by the internal edge removal algorithm to determine if two edges are shared. (unit: meter^2)
 	float		mInternalEdgeRemovalVertexToleranceSq = cDefaultInternalEdgeRemovalVertexToleranceSq;
 
-	/// Face coverage and buried-boundary tolerance for enhanced internal edge removal against static compound bodies.
-	/// Set to the convex rounding radius of the static geometry; zero preserves vertex-only removal. (unit: meter)
-	float		mInternalEdgeRemovalFaceTolerance = 0.0f;
-
 	/// Number of solver velocity iterations to run
 	/// Note that this needs to be >= 2 in order for friction to work (friction is applied using the non-penetration impulse from the previous iteration)
 	uint		mNumVelocitySteps = 10;

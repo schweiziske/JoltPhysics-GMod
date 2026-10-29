@@ -14,7 +14,6 @@
 #include <Jolt/Physics/Collision/AABoxCast.h>
 #include <Jolt/Physics/Collision/ShapeCast.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
-#include <Jolt/Physics/Collision/CompoundSurfaceContact.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollideConvexVsTriangles.h>
@@ -1122,43 +1121,6 @@ void PhysicsSystem::sDefaultSimCollideBodyVsBody(const Body &inBody1, const Body
 	{
 		// Collide with enhanced internal edge removal
 		ioCollideShapeSettings.mActiveEdgeMode = EActiveEdgeMode::CollideWithAll;
-		if (inBody2.IsStatic() && inBody2.GetShape()->GetType() == EShapeType::Compound
-			&& ioCollideShapeSettings.mInternalEdgeRemovalFaceTolerance > 0.0f)
-		{
-			InternalEdgeRemovingCollector edges(ioCollector, ioCollideShapeSettings.mInternalEdgeRemovalVertexToleranceSq
-			#ifdef JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
-				, inBody1.GetCenterOfMassPosition()
-			#endif
-				, ioCollideShapeSettings.mInternalEdgeRemovalFaceTolerance);
-			class SurfaceCollector final : public CollideShapeCollector
-			{
-			public:
-				SurfaceCollector(CollideShapeCollector &inNext, const Shape *inMoving, const Shape *inTarget,
-					Mat44Arg inTargetTransform, float inTolerance, const ShapeFilter &inFilter) :
-					CollideShapeCollector(inNext), mNext(inNext), mMoving(inMoving), mTarget(inTarget),
-					mTargetTransform(inTargetTransform), mTolerance(inTolerance), mFilter(inFilter) { }
-				virtual void AddHit(const CollideShapeResult &inHit) override
-				{
-					if (!IsContactBuriedInCompound(mMoving, mTarget, mTargetTransform, inHit, mTolerance, mFilter))
-					{
-						mNext.SetContext(GetContext());
-						mNext.AddHit(inHit);
-						UpdateEarlyOutFraction(mNext.GetEarlyOutFraction());
-					}
-				}
-				CollideShapeCollector &mNext;
-				const Shape *mMoving;
-				const Shape *mTarget;
-				Mat44 mTargetTransform;
-				float mTolerance;
-				const ShapeFilter &mFilter;
-			} surface(edges, inBody1.GetShape(), inBody2.GetShape(), inCenterOfMassTransform2,
-				ioCollideShapeSettings.mInternalEdgeRemovalFaceTolerance, inShapeFilter);
-			CollisionDispatch::sCollideShapeVsShape(inBody1.GetShape(), inBody2.GetShape(), Vec3::sOne(), Vec3::sOne(),
-				inCenterOfMassTransform1, inCenterOfMassTransform2, part1, part2, ioCollideShapeSettings, surface, inShapeFilter);
-			edges.Flush();
-			return;
-		}
 		InternalEdgeRemovingCollector::sCollideShapeVsShape(inBody1.GetShape(), inBody2.GetShape(), Vec3::sOne(), Vec3::sOne(), inCenterOfMassTransform1, inCenterOfMassTransform2, part1, part2, ioCollideShapeSettings, ioCollector, inShapeFilter
 		#ifdef JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
 			, inBody1.GetCenterOfMassPosition() // Query is done relative to the position of body 1
@@ -1226,8 +1188,6 @@ void PhysicsSystem::ProcessBodyPair(ContactAllocator &ioContactAllocator, const 
 		settings.mMaxSeparationDistance = body1->IsSensor() || body2->IsSensor()? 0.0f : mPhysicsSettings.mSpeculativeContactDistance;
 		settings.mActiveEdgeMovementDirection = body1->GetLinearVelocity() - body2->GetLinearVelocity();
 		settings.mInternalEdgeRemovalVertexToleranceSq = mPhysicsSettings.mInternalEdgeRemovalVertexToleranceSq;
-		if (body2->IsStatic() && body2->GetShape()->GetType() == EShapeType::Compound)
-			settings.mInternalEdgeRemovalFaceTolerance = mPhysicsSettings.mInternalEdgeRemovalFaceTolerance;
 
 		// Create shape filter
 		SimShapeFilterWrapper shape_filter(mSimShapeFilter, body1);
@@ -2127,16 +2087,13 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 		class CCDNarrowPhaseCollector : public CastShapeCollector
 		{
 		public:
-									CCDNarrowPhaseCollector(const BodyManager &inBodyManager, ContactConstraintManager &inContactConstraintManager, SoftBodyContactListener *inSoftBodyContactListener, CCDBody &inCCDBody, ShapeCastResult &inResult, float inDeltaTime, SimShapeFilterWrapper &inShapeFilter, float inFaceTolerance, float inMaxCompoundPenetration) :
+										CCDNarrowPhaseCollector(const BodyManager &inBodyManager, ContactConstraintManager &inContactConstraintManager, SoftBodyContactListener *inSoftBodyContactListener, CCDBody &inCCDBody, ShapeCastResult &inResult, float inDeltaTime) :
 				mBodyManager(inBodyManager),
 				mContactConstraintManager(inContactConstraintManager),
 				mSoftBodyContactListener(inSoftBodyContactListener),
 				mCCDBody(inCCDBody),
 				mResult(inResult),
-				mDeltaTime(inDeltaTime),
-				mShapeFilter(inShapeFilter),
-				mFaceTolerance(inFaceTolerance),
-				mMaxCompoundPenetration(inMaxCompoundPenetration)
+				mDeltaTime(inDeltaTime)
 			{
 			}
 
@@ -2157,67 +2114,12 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 					// <=> dist = mMaxPenetration * |delta_pos| / normal . delta_pos
 					// Converting to a faction: delta_fraction = dist / |delta_pos| = mLinearCastTreshold / normal . delta_pos
 					float denominator = normal.Dot(mCCDBody.mDeltaPosition);
-					float max_penetration = mCCDBody.mMaxPenetration;
-					if (mFaceTolerance > 0.0f)
+					if (denominator > mCCDBody.mMaxPenetration) // Avoid dividing by zero, if extra hit fraction > 1 there's also no point in continuing
 					{
-						const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
-						const Body &body1 = mBodyManager.GetBody(mCCDBody.mBodyID1);
-						// Zero slop can clip all tangential movement on rounded compound
-						// seams. Allow at most the configured rounding radius for this pair.
-						if (body2.IsStatic() && body2.GetShape()->GetType() == EShapeType::Compound
-							&& body1.GetEnhancedInternalEdgeRemovalWithBody(body2))
-							max_penetration = max(max_penetration, mMaxCompoundPenetration);
-					}
-					if (denominator > max_penetration) // Avoid dividing by zero, if extra hit fraction > 1 there's also no point in continuing
-					{
-						float fraction_plus_slop = fraction + max_penetration / denominator;
+						float fraction_plus_slop = fraction + mCCDBody.mMaxPenetration / denominator;
 						if (fraction_plus_slop < mCCDBody.mFractionPlusSlop)
 						{
 							const Body &body2 = mBodyManager.GetBody(inResult.mBodyID2);
-							const Body &body1 = mBodyManager.GetBody(mCCDBody.mBodyID1);
-							if (mFaceTolerance > 0.0f && body2.IsStatic() && body2.GetShape()->GetType() == EShapeType::Compound
-								&& body1.GetEnhancedInternalEdgeRemovalWithBody(body2))
-							{
-								Mat44 target_transform = body2.GetCenterOfMassTransform().PostTranslated(-body1.GetCenterOfMassPosition()).ToMat44();
-								if (IsContactBuriedInCompound(body1.GetShape(), body2.GetShape(), target_transform, inResult, mFaceTolerance, mShapeFilter.GetFilter()))
-									return;
-							}
-
-							// A tangential cast may hit a rounded BSP seam without reporting the
-							// neighbouring support face. Verify edge hits at the actual hit pose;
-							// real face impacts and dynamic targets retain the native CCD path.
-							if (mFaceTolerance > 0.0f && body2.IsStatic() && body2.GetShape()->GetType() == EShapeType::Compound
-								&& body1.GetEnhancedInternalEdgeRemovalWithBody(body2) && !InternalEdgeRemovingCollector::sIsFaceContact(inResult))
-							{
-								class SupportCollector : public CollideShapeCollector
-								{
-								public:
-									SupportCollector(const CollideShapeResult &inEdge, float inTolerance) : mEdge(inEdge), mTolerance(inTolerance) { }
-									virtual void AddHit(const CollideShapeResult &inSupport) override
-									{
-										if (InternalEdgeRemovingCollector::sIsContactCoveredByFace(mEdge, inSupport, mTolerance))
-										{
-											mCovered = true;
-											ForceEarlyOut();
-										}
-									}
-									const CollideShapeResult &mEdge;
-									float mTolerance;
-									bool mCovered = false;
-								} support(inResult, mFaceTolerance);
-								CollideShapeSettings support_settings;
-								support_settings.mCollectFacesMode = ECollectFacesMode::CollectFaces;
-								support_settings.mActiveEdgeMode = EActiveEdgeMode::CollideWithAll;
-								support_settings.mMaxSeparationDistance = mFaceTolerance;
-								RVec3 base = body1.GetCenterOfMassPosition();
-								Mat44 transform1 = body1.GetCenterOfMassTransform().PostTranslated(-base).ToMat44();
-								transform1.SetTranslation(fraction * mCCDBody.mDeltaPosition);
-								Mat44 transform2 = body2.GetCenterOfMassTransform().PostTranslated(-base).ToMat44();
-								CollisionDispatch::sCollideShapeVsShape(body1.GetShape(), body2.GetShape(), Vec3::sOne(), Vec3::sOne(), transform1, transform2,
-									SubShapeIDCreator(), SubShapeIDCreator(), support_settings, support, mShapeFilter.GetFilter());
-								if (support.mCovered)
-									return;
-							}
 
 							// Check if we've already accepted all hits from this body
 							if (mValidateBodyPair)
@@ -2312,17 +2214,11 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 			CCDBody &					mCCDBody;
 			ShapeCastResult &			mResult;
 			float						mDeltaTime;
-			SimShapeFilterWrapper &	mShapeFilter;
-			float						mFaceTolerance;
-			float						mMaxCompoundPenetration;
 		};
 
 		// Narrowphase collector
 		ShapeCastResult cast_shape_result;
-		SimShapeFilterWrapper shape_filter(mSimShapeFilter, &body);
-		float face_tolerance = mPhysicsSettings.mInternalEdgeRemovalFaceTolerance;
-		float max_compound_penetration = min(face_tolerance, mPhysicsSettings.mLinearCastMaxPenetration * body.GetShape()->GetInnerRadius());
-		CCDNarrowPhaseCollector np_collector(mBodyManager, mContactManager, mSoftBodyContactListener, ccd_body, cast_shape_result, ioContext->mStepDeltaTime, shape_filter, face_tolerance, max_compound_penetration);
+		CCDNarrowPhaseCollector np_collector(mBodyManager, mContactManager, mSoftBodyContactListener, ccd_body, cast_shape_result, ioContext->mStepDeltaTime);
 
 		// This collector wraps the narrowphase collector and collects the closest hit
 		class CCDBroadPhaseCollector : public CastShapeBodyCollector
@@ -2412,6 +2308,9 @@ void PhysicsSystem::JobFindCCDContacts(const PhysicsUpdateContext *ioContext, Ph
 			PhysicsUpdateContext::Step *mStep;
 			float						mDeltaTime;
 		};
+
+		// Create shape filter
+		SimShapeFilterWrapper shape_filter(mSimShapeFilter, &body);
 
 	#ifdef JPH_TRACK_SIMULATION_STATS
 		uint64 start_tick = GetProcessorTickCount();

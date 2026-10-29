@@ -305,7 +305,6 @@ void NarrowPhaseQuery::CollideShapeWithInternalEdgeRemoval(const Shape *inShape,
 	#ifdef JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
 		, inBaseOffset
 	#endif // JPH_INTERNAL_EDGE_REMOVING_COLLECTOR_DEBUG
-		, settings.mInternalEdgeRemovalFaceTolerance
 	);
 	CollideShape(inShape, inShapeScale, inCenterOfMassTransform, settings, inBaseOffset, wrapper, inBroadPhaseLayerFilter, inObjectLayerFilter, inBodyFilter, inShapeFilter);
 }
