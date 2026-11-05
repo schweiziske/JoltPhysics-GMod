@@ -370,6 +370,12 @@ private:
 		static constexpr uint16 cSavedFlags = (uint16)EFlags::VPhysicsDeferPlayerSupport
 			| (uint16)EFlags::VPhysicsPlayerSupportStartup | (uint16)EFlags::ResponseEstablished;
 
+		// Per-update claims prevent a replacement feature and the old feature from
+		// both inheriting the same friction spring / supporting pressure.
+		static constexpr uint16 cHistoryClaimMask = 0x0f00;
+		bool IsHistoryClaimed(uint inPoint) const { return (mFlags.load(memory_order_relaxed) & (uint16(1) << (8 + inPoint))) != 0; }
+		bool ClaimHistory(uint inPoint) const { uint16 bit = uint16(1) << (8 + inPoint); return (mFlags.fetch_or(bit, memory_order_relaxed) & bit) == 0; }
+
 		/// @see EFlags
 		mutable atomic<uint16>	mFlags { 0 };
 
@@ -407,11 +413,16 @@ private:
 		/// Note: this value is read through sLoadFloat3Unsafe
 		Float3					mDeltaRotation;
 
+		/// Pose at the last local geometry update. The original pose above remains the
+		/// coverage anchor: local updates must not indefinitely hide new subshape pairs.
+		Float3					mGeometryDeltaPosition;
+		Float3					mGeometryDeltaRotation;
+
 		/// Handle to first manifold in ManifoldCache::mCachedManifolds
 		uint32					mFirstCachedManifold;
 	};
 
-	static_assert(sizeof(CachedBodyPair) == 28, "Unexpected size");
+	static_assert(sizeof(CachedBodyPair) == 52, "Unexpected size");
 	static_assert(alignof(CachedBodyPair) == 4, "Assuming 4 byte aligned");
 
 	/// Define a map that maps BodyPair -> CachedBodyPair
@@ -509,6 +520,7 @@ private:
 		CachedContactPoint *	mContactPoint;
 		bool					mAllowContactRescue = false;
 		bool					mAllowRestitution = false;
+		bool mNewLegacyContact = false;
 	};
 
 	class ContactConstraintBase

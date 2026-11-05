@@ -10,6 +10,7 @@
 #include <Jolt/Physics/PhysicsUpdateContext.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
+#include <Jolt/Physics/Collision/PersistentContactManifold.h>
 #include <Jolt/Physics/IslandBuilder.h>
 #include <Jolt/Physics/DeterminismLog.h>
 #include <Jolt/Core/TempAllocator.h>
@@ -334,12 +335,16 @@ void ContactConstraintManager::CachedBodyPair::SaveState(StateRecorder &inStream
 {
 	inStream.Write(mDeltaPosition);
 	inStream.Write(mDeltaRotation);
+	inStream.Write(mGeometryDeltaPosition);
+	inStream.Write(mGeometryDeltaRotation);
 }
 
 void ContactConstraintManager::CachedBodyPair::RestoreState(StateRecorder &inStream)
 {
 	inStream.Read(mDeltaPosition);
 	inStream.Read(mDeltaRotation);
+	inStream.Read(mGeometryDeltaPosition);
+	inStream.Read(mGeometryDeltaRotation);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -963,6 +968,7 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 			break; // Out of cache space
 		CachedManifold *output_cm = &output_kv->GetValue();
 		memcpy(output_cm, &input_cm, CachedManifold::sGetRequiredTotalSize(input_cm.mNumContactPoints));
+		output_cm->mFlags.fetch_and(uint16(~CachedManifold::cHistoryClaimMask), memory_order_relaxed);
 		// This flag only bridges the discrete and CCD passes of one update. A manifold copied
 		// from the previous update must become ordinary support again.
 		output_cm->mFlags.fetch_and(
@@ -1096,6 +1102,7 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 					|| ccp.mVPhysicsFrictionNormalLambda > 0.0f;
 				const bool has_established_contact = has_cached_support
 					|| ccp.mVPhysicsContactEstablished;
+				wcp.mNewLegacyContact = constraint->mUseLegacyFriction && !constraint->mUseVPhysicsSolver && !has_established_contact;
 				constraint->mContactHasCachedSupport |= has_cached_support;
 				constraint->mResponseEstablished |= has_established_contact;
 				bool allow_contact_rescue = !has_established_contact;
@@ -1126,7 +1133,7 @@ void ContactConstraintManager::TemplatedGetContactsFromCache(ContactAllocator &i
 				// A pending speculative manifold can persist for several updates before it actually
 				// crosses IVP's inner impact distance. That first supported update still gets the one
 				// restitution response; an already-supported rolling contact never does.
-				bool allow_restitution = !mPhysicsSettings.mContactRestitutionOnlyOnNewContact || fresh_impact;
+				bool allow_restitution = !mPhysicsSettings.mContactRestitutionOnlyOnNewContact || fresh_impact || wcp.mNewLegacyContact;
 				const bool native_tuning = settings.mVPhysicsUseNativeContactTuning;
 				wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, world_space_normal, t1, t2, settings, min_velocity_for_restitution,
 					native_tuning? 0.0f : mPhysicsSettings.mContactSeparationTarget,
@@ -1179,6 +1186,7 @@ void ContactConstraintManager::GetContactsFromCache(ContactAllocator &ioContactA
 	if (kv == nullptr)
 		return;
 	const CachedBodyPair &input_cbp = kv->GetValue();
+	const float coverage_distance = mPhysicsSettings.mSpeculativeContactDistance;
 
 	// Get relative translation
 	Quat inv_r1 = body1->GetRotation().Conjugated();
@@ -1204,6 +1212,48 @@ void ContactConstraintManager::GetContactsFromCache(ContactAllocator &ioContactA
 	if (abs(delta_rotation.Dot(old_delta_rotation)) < mPhysicsSettings.mBodyPairCacheCosMaxDeltaRotationDiv2)
 		return;
 
+	// IVP retains a contact feature while updating its geometry. A moving pair must
+	// not keep solving with material points from a previous rolling/sliding pose.
+	Array<ContactManifold> refreshed;
+	if (input_cbp.mFirstCachedManifold != ManifoldMap::cInvalidHandle
+		&& !body1->IsSensor() && !body2->IsSensor())
+	{
+		Float3 packed_rotation;
+		delta_rotation.StoreFloat3(&packed_rotation);
+		Quat current = Quat::sLoadFloat3Unsafe(packed_rotation);
+		Quat previous = Quat::sLoadFloat3Unsafe(input_cbp.mGeometryDeltaRotation);
+		if (current.Dot(previous) < 0.0f)
+			previous = -previous;
+		bool moved = (delta_position - Vec3::sLoadFloat3Unsafe(input_cbp.mGeometryDeltaPosition)).LengthSq() > Square(1.0e-5f)
+			|| (current.GetXYZ() - previous.GetXYZ()).LengthSq() + Square(current.GetW() - previous.GetW()) > Square(5.0e-6f);
+		if (moved)
+		{
+			for (uint32 handle = input_cbp.mFirstCachedManifold; handle != ManifoldMap::cInvalidHandle; )
+			{
+				const MKeyValue *cached = read_cache.FromHandle(handle);
+				const CachedManifold &cm = cached->GetValue();
+				ContactManifold manifold;
+				manifold.mSubShapeID1 = cached->GetKey().GetSubShapeID1();
+				manifold.mSubShapeID2 = cached->GetKey().GetSubShapeID2();
+				manifold.mBaseOffset = body1->GetCenterOfMassPosition();
+				Mat44 transform1 = body1->GetCenterOfMassTransform().PostTranslated(-manifold.mBaseOffset).ToMat44();
+				Mat44 transform2 = body2->GetCenterOfMassTransform().PostTranslated(-manifold.mBaseOffset).ToMat44();
+				for (uint i = 0; i < cm.mNumContactPoints; ++i)
+				{
+					manifold.mRelativeContactPointsOn1.push_back(transform1 * Vec3::sLoadFloat3Unsafe(cm.mContactPoints[i].mPosition1));
+					manifold.mRelativeContactPointsOn2.push_back(transform2 * Vec3::sLoadFloat3Unsafe(cm.mContactPoints[i].mPosition2));
+				}
+				Vec3 local_normal = Vec3::sLoadFloat3Unsafe(cm.mContactNormal);
+				if (!PersistentContactManifold::Refresh(*body1, *body2,
+					body1->GetRotation() * (Quat::sLoadFloat3Unsafe(input_cbp.mGeometryDeltaRotation) * local_normal),
+					body2->GetRotation() * local_normal, coverage_distance, manifold))
+					return; // Only this pair is rediscovered; its read cache remains available.
+				refreshed.push_back(manifold);
+				handle = cm.mNextWithSameBodyPair;
+			}
+		}
+	}
+
 	// The cache is valid, return that we've handled this body pair
 	outPairHandled = true;
 
@@ -1214,6 +1264,17 @@ void ContactConstraintManager::GetContactsFromCache(ContactAllocator &ioContactA
 		return; // Out of cache space
 	CachedBodyPair *output_cbp = &output_bp_kv->GetValue();
 	memcpy(output_cbp, &input_cbp, sizeof(CachedBodyPair));
+	if (!refreshed.empty())
+	{
+		// All features were validated before allocating or publishing any new contact.
+		output_cbp->mFirstCachedManifold = ManifoldMap::cInvalidHandle;
+		delta_position.StoreFloat3(&output_cbp->mGeometryDeltaPosition);
+		delta_rotation.StoreFloat3(&output_cbp->mGeometryDeltaRotation);
+		bool activate_and_link = true;
+		for (const ContactManifold &manifold : refreshed)
+			AddContactConstraint(ioContactAllocator, activate_and_link, output_cbp, *body1, *body2, manifold);
+		return;
+	}
 
 	// If there were no contacts, we have handled the contact
 	if (input_cbp.mFirstCachedManifold == ManifoldMap::cInvalidHandle)
@@ -1274,12 +1335,14 @@ ContactConstraintManager::BodyPairHandle ContactConstraintManager::AddBodyPair(C
 
 	// Store it
 	delta_position.StoreFloat3(&cbp->mDeltaPosition);
+	delta_position.StoreFloat3(&cbp->mGeometryDeltaPosition);
 
 	// Determine relative orientation
 	Quat delta_rotation = inv_r1 * body2->GetRotation();
 
 	// Store it
 	delta_rotation.StoreFloat3(&cbp->mDeltaRotation);
+	delta_rotation.StoreFloat3(&cbp->mGeometryDeltaRotation);
 
 	return cbp;
 }
@@ -1475,7 +1538,8 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 			float legacy_friction_normal_lambda = 0.0f;
 			bool legacy_contact_established = false;
 			for (const CachedContactPoint *ccp = ccp_start; ccp < ccp_end; ccp++)
-				if (Vec3::sLoadFloat3Unsafe(ccp->mPosition1).IsClose(p1_ls, mPhysicsSettings.mContactPointPreserveLambdaMaxDistSq)
+				if ((!settings.mVPhysicsUseLegacyFriction || !old_manifold->IsHistoryClaimed(uint(ccp - ccp_start)))
+					&& Vec3::sLoadFloat3Unsafe(ccp->mPosition1).IsClose(p1_ls, mPhysicsSettings.mContactPointPreserveLambdaMaxDistSq)
 					&& Vec3::sLoadFloat3Unsafe(ccp->mPosition2).IsClose(p2_ls, mPhysicsSettings.mContactPointPreserveLambdaMaxDistSq))
 				{
 					// Get lambdas from previous frame
@@ -1504,7 +1568,8 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 				for (const CachedContactPoint *ccp = ccp_start; ccp < ccp_end; ++ccp)
 				{
 					const int candidate_index = int(ccp - ccp_start);
-					if (legacy_contact_used[candidate_index])
+					if (legacy_contact_used[candidate_index]
+						|| (settings.mVPhysicsUseLegacyFriction && old_manifold->IsHistoryClaimed(candidate_index)))
 						continue;
 					const float distance_sq = (Vec3::sLoadFloat3Unsafe(ccp->mPosition1) - p1_ls).LengthSq()
 						+ (Vec3::sLoadFloat3Unsafe(ccp->mPosition2) - p2_ls).LengthSq();
@@ -1515,10 +1580,55 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 					}
 				}
 			}
-			if (legacy_contact_index >= 0)
+			const CachedManifold *legacy_source = old_manifold;
+			// IVP moves pretension when a contact feature is replaced. Permit a bounded
+			// transfer across subshape IDs on the same body pair, with compatible surface
+			// orientation and materials. Do not transfer native warm-start impulses.
+			if (legacy_contact_index < 0 && settings.mVPhysicsUseLegacyFriction
+				&& !inBody1.IsCollisionCacheInvalid() && !inBody2.IsCollisionCacheInvalid())
 			{
-				legacy_contact_used[legacy_contact_index] = true;
-				const CachedContactPoint &legacy_contact = ccp_start[legacy_contact_index];
+				BodyPair pair_key(inBody1.GetID(), inBody2.GetID());
+				const BPKeyValue *previous_pair = read_cache.Find(pair_key, pair_key.GetHash());
+				float closest = 2.0f * mPhysicsSettings.mContactPointPreserveLambdaMaxDistSq;
+				if (previous_pair != nullptr)
+					for (uint32 handle = previous_pair->GetValue().mFirstCachedManifold; handle != ManifoldMap::cInvalidHandle; )
+					{
+						const MKeyValue *candidate_kv = read_cache.FromHandle(handle);
+						const CachedManifold &candidate = candidate_kv->GetValue();
+						handle = candidate.mNextWithSameBodyPair;
+						if (&candidate == old_manifold || candidate.mNumContactPoints == 0)
+							continue;
+						Vec3 candidate_normal = inBody2.GetRotation() * Vec3::sLoadFloat3Unsafe(candidate.mContactNormal);
+						if (candidate_normal.Dot(inManifold.mWorldSpaceNormal) < mPhysicsSettings.mContactNormalCosMaxDeltaRotation
+							|| inBody1.GetShape()->GetMaterial(candidate_kv->GetKey().GetSubShapeID1()) != inBody1.GetShape()->GetMaterial(inManifold.mSubShapeID1)
+							|| inBody2.GetShape()->GetMaterial(candidate_kv->GetKey().GetSubShapeID2()) != inBody2.GetShape()->GetMaterial(inManifold.mSubShapeID2))
+							continue;
+						for (uint j = 0; j < candidate.mNumContactPoints; ++j)
+						{
+							const CachedContactPoint &point = candidate.mContactPoints[j];
+							if (candidate.IsHistoryClaimed(j) || !point.mVPhysicsContactEstablished)
+								continue;
+							float d1 = (Vec3::sLoadFloat3Unsafe(point.mPosition1) - p1_ls).LengthSq();
+							float d2 = (Vec3::sLoadFloat3Unsafe(point.mPosition2) - p2_ls).LengthSq();
+							// Nearby parallel surfaces are not necessarily one continuous feature.
+							if (abs((inBody1.GetRotation() * (Vec3::sLoadFloat3Unsafe(point.mPosition1) - p1_ls)).Dot(inManifold.mWorldSpaceNormal)) > 1.0e-4f
+								|| abs((inBody2.GetRotation() * (Vec3::sLoadFloat3Unsafe(point.mPosition2) - p2_ls)).Dot(inManifold.mWorldSpaceNormal)) > 1.0e-4f)
+								continue;
+							if (d1 <= mPhysicsSettings.mContactPointPreserveLambdaMaxDistSq && d2 <= mPhysicsSettings.mContactPointPreserveLambdaMaxDistSq && d1 + d2 < closest)
+							{
+								closest = d1 + d2;
+								legacy_source = &candidate;
+								legacy_contact_index = int(j);
+							}
+						}
+					}
+			}
+			if (legacy_contact_index >= 0
+				&& (!settings.mVPhysicsUseLegacyFriction || legacy_source->ClaimHistory(legacy_contact_index)))
+			{
+				if (legacy_source == old_manifold)
+					legacy_contact_used[legacy_contact_index] = true;
+				const CachedContactPoint &legacy_contact = legacy_source->mContactPoints[legacy_contact_index];
 				legacy_friction_displacement = Vec3::sLoadFloat3Unsafe(
 					legacy_contact.mVPhysicsFrictionDisplacement);
 				legacy_friction_normal_lambda = legacy_contact.mVPhysicsFrictionNormalLambda;
@@ -1543,6 +1653,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 				|| legacy_friction_normal_lambda > 0.0f;
 			const bool has_established_contact = has_cached_support
 				|| legacy_contact_established;
+			wcp.mNewLegacyContact = constraint->mUseLegacyFriction && !constraint->mUseVPhysicsSolver && !has_established_contact;
 			constraint->mContactHasCachedSupport |= has_cached_support;
 			constraint->mResponseEstablished |= has_established_contact;
 			bool allow_contact_rescue = !has_established_contact;
@@ -1571,7 +1682,7 @@ void ContactConstraintManager::TemplatedAddContactConstraint(ContactAllocator &i
 				constraint->mVPhysicsNativeImpactCorrection = true;
 			}
 			bool allow_restitution = !mPhysicsSettings.mContactRestitutionOnlyOnNewContact
-				|| !contact_persisted || fresh_impact;
+				|| !contact_persisted || fresh_impact || wcp.mNewLegacyContact;
 			const bool native_tuning = settings.mVPhysicsUseNativeContactTuning;
 			wcp.CalculateFrictionAndNonPenetrationConstraintProperties(delta_time, gravity, inBody1, inBody2, constraint->mInvMass1, constraint->mInvMass2, inv_i1, inv_i2, p1_ws, p2_ws, inManifold.mWorldSpaceNormal, t1, t2, settings, mPhysicsSettings.mMinVelocityForRestitution,
 				native_tuning? 0.0f : mPhysicsSettings.mContactSeparationTarget,
@@ -2168,7 +2279,7 @@ bool ContactConstraintManager::sSolveVelocityConstraint(ContactConstraintBase &i
 	// Native tangents are unused by normal-only passes and Havana friction.
 	Vec3 t1, t2;
 	if constexpr (SolveFriction)
-		if (!constraint.mUseLegacyFriction && !constraint.mUseVPhysicsSolver)
+		if (!constraint.mUseVPhysicsSolver)
 			constraint.GetTangents(t1, t2);
 
 	// Get velocities
@@ -2199,10 +2310,14 @@ bool ContactConstraintManager::sSolveVelocityConstraint(ContactConstraintBase &i
 
 	// First apply all friction constraints (non-penetration is more important than friction)
 	if constexpr (SolveFriction)
-	if (!constraint.mUseLegacyFriction && !constraint.mUseVPhysicsSolver)
+	if (!constraint.mUseVPhysicsSolver)
 	for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
 	{
 		WorldContactPoint<Type1, Type2> &wcp = constraint.mContactPoints[i];
+		// A pending/new legacy point has no distance-keeper pressure yet.
+		// Give its first response ordinary Coulomb friction in the contact iterations.
+		if (constraint.mUseLegacyFriction && !wcp.mNewLegacyContact)
+			continue;
 
 		// Check if friction is enabled
 		if (wcp.mFrictionConstraint1.IsActive() || wcp.mFrictionConstraint2.IsActive())
@@ -3065,6 +3180,13 @@ void ContactConstraintManager::sIntegrateLegacyFrictionState(ContactConstraintBa
 	for (uint32 i = 0; i < constraint.mNumContactPoints; ++i)
 	{
 		WorldContactPoint<Type1, Type2> &wcp = constraint.mContactPoints[i];
+		// Speculative approach and the initial impact are not a full step of
+		// persistent sliding. Start the spring on the next supported update.
+		if (wcp.mNewLegacyContact || wcp.mNonPenetrationConstraint.GetTotalLambda() <= 0.0f)
+		{
+			Vec3::sZero().StoreFloat3(&wcp.mContactPoint->mVPhysicsFrictionDisplacement);
+			continue;
+		}
 		// Zero-friction rows are only Deactivate()d by native setup: their
 		// Jacobians and bias are uninitialized. Follow Jolt's active-row contract.
 		if (!wcp.mFrictionConstraint1.IsActive() && !wcp.mFrictionConstraint2.IsActive())
@@ -3493,13 +3615,13 @@ float ContactConstraintManager::sStoreAppliedImpulses(ContactConstraintBase &ioC
 		wcp.mContactPoint->mNonPenetrationLambda = point_normal_impulse;
 		wcp.mContactPoint->mFrictionLambda[0] = wcp.mFrictionConstraint1.GetTotalLambda();
 		wcp.mContactPoint->mFrictionLambda[1] = wcp.mFrictionConstraint2.GetTotalLambda();
-		wcp.mContactPoint->mVPhysicsFrictionNormalLambda = point_normal_impulse;
+		wcp.mContactPoint->mVPhysicsFrictionNormalLambda = wcp.mNewLegacyContact? 0.0f : point_normal_impulse;
 		wcp.mContactPoint->mVPhysicsContactEstablished =
 			wcp.mContactPoint->mVPhysicsContactEstablished || point_normal_impulse > 0.0f;
 		// The listener's normal-pressure value is the distance-keeper contribution. The
 		// one-shot impact lambda is still retained in the solver cache above, but is not
 		// published as continuous Source friction pressure.
-		if ( !constraint.mContactImpacting && !constraint.mImpactResponseThisStep )
+		if ( !constraint.mContactImpacting && !constraint.mImpactResponseThisStep && !wcp.mNewLegacyContact )
 			normal_impulse += point_normal_impulse;
 	}
 	if (queue_native_impact_correction)
