@@ -406,9 +406,13 @@ void SoftBodyMotionProperties::ApplyDihedralBendConstraints(const SoftBodyUpdate
 		Vec3 n2 = x1x3.Cross(x3 - x0);
 		float n1_len_sq = n1.LengthSq();
 		float n2_len_sq = n2.LengthSq();
-		float n1_len_sq_n2_len_sq = n1_len_sq * n2_len_sq;
-		if (n1_len_sq_n2_len_sq < 1.0e-24f)
+		// Check before multiplying in float: with FP exceptions enabled an
+		// overflowing product traps before an isfinite check could reject it.
+		// A diverged constraint must not bring down the entire simulation.
+		double normal_product = double(n1_len_sq) * double(n2_len_sq);
+		if (!(normal_product >= 1.0e-24 && normal_product <= double(FLT_MAX)))
 			continue;
+		float n1_len_sq_n2_len_sq = float(normal_product);
 
 		// Calculate constraint equation
 		// As per "Strain Based Dynamics" Appendix A we need to negate the gradients when (n1 x n2) . e > 0, instead we make sure that the sign of the constraint equation is correct

@@ -2254,7 +2254,7 @@ void HeightFieldShape::CollideSoftBodyVertices(Mat44Arg inCenterOfMassTransform,
 
 		JPH_INLINE bool	ShouldVisitRangeBlock([[maybe_unused]] int inStackTop) const
 		{
-			return mDistanceStack[inStackTop] < mClosestDistanceSq;
+			return mDistanceStack[inStackTop] < GetSearchDistanceSq();
 		}
 
 		JPH_INLINE int	VisitRangeBlock(Vec4Arg inBoundsMinX, Vec4Arg inBoundsMinY, Vec4Arg inBoundsMinZ, Vec4Arg inBoundsMaxX, Vec4Arg inBoundsMaxY, Vec4Arg inBoundsMaxZ, UVec4 &ioProperties, int inStackTop)
@@ -2270,7 +2270,7 @@ void HeightFieldShape::CollideSoftBodyVertices(Mat44Arg inCenterOfMassTransform,
 			dist_sq = Vec4::sSelect(Vec4::sReplicate(FLT_MAX), dist_sq, Vec4::sLessOrEqual(inBoundsMinY, inBoundsMaxY));
 
 			// Sort so that highest values are first (we want to first process closer hits and we process stack top to bottom)
-			return SortReverseAndStore(dist_sq, mClosestDistanceSq, ioProperties, &mDistanceStack[inStackTop]);
+			return SortReverseAndStore(dist_sq, GetSearchDistanceSq(), ioProperties, &mDistanceStack[inStackTop]);
 		}
 
 		JPH_INLINE void	VisitTriangle([[maybe_unused]] uint inX, [[maybe_unused]] uint inY, [[maybe_unused]] uint inTriangle, Vec3Arg inV0, Vec3Arg inV1, Vec3Arg inV2)

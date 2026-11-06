@@ -845,7 +845,7 @@ void MeshShape::CollideSoftBodyVertices(Mat44Arg inCenterOfMassTransform, Vec3Ar
 
 		JPH_INLINE bool	ShouldVisitNode([[maybe_unused]] int inStackTop) const
 		{
-			return mDistanceStack[inStackTop] < mClosestDistanceSq;
+			return mDistanceStack[inStackTop] < GetSearchDistanceSq();
 		}
 
 		JPH_INLINE int	VisitNodes(Vec4Arg inBoundsMinX, Vec4Arg inBoundsMinY, Vec4Arg inBoundsMinZ, Vec4Arg inBoundsMaxX, Vec4Arg inBoundsMaxY, Vec4Arg inBoundsMaxZ, UVec4 &ioProperties, int inStackTop)
@@ -858,7 +858,7 @@ void MeshShape::CollideSoftBodyVertices(Mat44Arg inCenterOfMassTransform, Vec3Ar
 			Vec4 dist_sq = AABox4DistanceSqToPoint(mLocalPosition, bounds_min_x, bounds_min_y, bounds_min_z, bounds_max_x, bounds_max_y, bounds_max_z);
 
 			// Sort so that highest values are first (we want to first process closer hits and we process stack top to bottom)
-			return SortReverseAndStore(dist_sq, mClosestDistanceSq, ioProperties, &mDistanceStack[inStackTop]);
+			return SortReverseAndStore(dist_sq, GetSearchDistanceSq(), ioProperties, &mDistanceStack[inStackTop]);
 		}
 
 		JPH_INLINE void	VisitTriangle(Vec3Arg inV0, Vec3Arg inV1, Vec3Arg inV2, [[maybe_unused]] uint8 inActiveEdges, [[maybe_unused]] SubShapeID inSubShapeID2)

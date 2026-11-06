@@ -25,6 +25,14 @@ public:
 	{
 		mLocalPosition = mInvTransform * inVertex.GetPosition();
 		mClosestDistanceSq = FLT_MAX;
+		mClosestFrontFacing = false;
+	}
+
+	// Duplicated opposite windings have the same distance. Keep both in the
+	// search so their BVH order cannot choose the back-facing contact plane.
+	JPH_INLINE float	GetSearchDistanceSq() const
+	{
+		return float(min(double(FLT_MAX), double(mClosestDistanceSq) * 1.000001 + 1.0e-12));
 	}
 
 	JPH_INLINE void		ProcessTriangle(Vec3Arg inV0, Vec3Arg inV1, Vec3Arg inV2)
@@ -38,7 +46,10 @@ public:
 		uint32 set;
 		Vec3 closest_point = ClosestPoint::GetClosestPointOnTriangle(v0 - mLocalPosition, v1 - mLocalPosition, v2 - mLocalPosition, set);
 		float dist_sq = closest_point.LengthSq();
-		if (dist_sq < mClosestDistanceSq)
+		float tolerance = 1.0e-6f * max(dist_sq, mClosestDistanceSq) + 1.0e-12f;
+		bool front_facing = mNormalSign * (v1 - v0).Cross(v2 - v0).Dot(mLocalPosition - v0) >= 0.0f;
+		if (dist_sq < mClosestDistanceSq - tolerance
+			|| (abs(dist_sq - mClosestDistanceSq) <= tolerance && front_facing && !mClosestFrontFacing))
 		{
 			mV0 = v0;
 			mV1 = v1;
@@ -46,6 +57,7 @@ public:
 			mClosestPoint = closest_point;
 			mClosestDistanceSq = dist_sq;
 			mSet = set;
+			mClosestFrontFacing = front_facing;
 		}
 	}
 
@@ -97,6 +109,7 @@ public:
 	float				mNormalSign;
 	float				mClosestDistanceSq;
 	uint32				mSet;
+	bool				mClosestFrontFacing;
 };
 
 JPH_NAMESPACE_END
